@@ -17,6 +17,9 @@ set(GLM_INCLUDE_DIR "${THIRD_PARTY_DIR}/glm")
 # Add fmt library (needs compilation)
 add_subdirectory(${THIRD_PARTY_DIR}/fmt)
 
+# Add SDL3 library
+add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
+
 # Create executable
 add_executable(VulkanEngine src/main.cpp)
 
@@ -28,4 +31,5 @@ target_include_directories(VulkanEngine PRIVATE
 # Link libraries
 target_link_libraries(VulkanEngine
         fmt::fmt
+        SDL3::SDL3
 )

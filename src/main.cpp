@@ -1,22 +1,23 @@
-#include <iostream>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 #include <fmt/format.h>
+#include <glm/glm.hpp>
+#include <SDL3/SDL.h>
 
 int main() {
-    fmt::print("Hello from CLion Vulkan Engine!\n");
+    // Test fmt
+    fmt::print("Hello from fmt!\n");
 
     // Test GLM
-    glm::vec3 position(1.0f, 2.0f, 3.0f);
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), position);
+    glm::vec3 testVec(1.0f, 2.0f, 3.0f);
+    fmt::print("GLM vector: ({}, {}, {})\n", testVec.x, testVec.y, testVec.z);
 
-    // Test fmt with GLM
-    fmt::print("GLM + fmt test successful!\n");
-    fmt::print("Position vector: ({}, {}, {})\n", position.x, position.y, position.z);
+    // Test SDL3
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        fmt::print("SDL3 initialization failed: {}\n", SDL_GetError());
+        return 1;
+    }
 
-    // Test some fmt formatting features
-    fmt::print("Formatted number: {:.2f}\n", 3.14159);
-    fmt::print("Hex value: 0x{:04X}\n", 255);
+    fmt::print("SDL3 initialized successfully!\n");
 
+    SDL_Quit();
     return 0;
 }
