@@ -17,6 +17,9 @@ set(THIRD_PARTY_DIR "${CMAKE_SOURCE_DIR}/third_party")
 # GLM (header-only math library)
 set(GLM_INCLUDE_DIR "${THIRD_PARTY_DIR}/glm")
 
+# VMA (header-only memory allocator)
+set(VMA_INCLUDE_DIR "${THIRD_PARTY_DIR}/VulkanMemoryAllocator/include")
+
 # Add fmt library (needs compilation)
 add_subdirectory(${THIRD_PARTY_DIR}/fmt)
 
@@ -32,6 +35,7 @@ add_executable(VulkanEngine src/main.cpp)
 # Include directories
 target_include_directories(VulkanEngine PRIVATE
         ${GLM_INCLUDE_DIR}
+        ${VMA_INCLUDE_DIR}
         ${Vulkan_INCLUDE_DIRS}
 )
 

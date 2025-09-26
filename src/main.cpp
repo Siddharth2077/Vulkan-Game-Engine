@@ -3,6 +3,9 @@
 #include <SDL3/SDL.h>
 #include <VkBootstrap.h>
 
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
 int main() {
     // Test fmt
     fmt::print("Hello from fmt!\n");
@@ -27,15 +30,20 @@ int main() {
 
     if (!inst_ret) {
         fmt::print("Failed to create Vulkan instance: {}\n", inst_ret.error().message());
-    } else {
-        fmt::print("vk-bootstrap: Vulkan instance created successfully!\n");
-
-        vkb::Instance vkb_inst = inst_ret.value();
-
-        // Clean up
-        destroy_instance(vkb_inst);
+        SDL_Quit();
+        return 1;
     }
 
+    fmt::print("vk-bootstrap: Vulkan instance created successfully!\n");
+    vkb::Instance vkb_inst = inst_ret.value();
+
+    // Test VMA (just check if we can create allocator info struct)
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_1;
+    fmt::print("VMA: Successfully included VulkanMemoryAllocator!\n");
+
+    // Clean up
+    vkb::destroy_instance(vkb_inst);
     SDL_Quit();
     return 0;
 }
