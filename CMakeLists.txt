@@ -23,6 +23,18 @@ set(VMA_INCLUDE_DIR "${THIRD_PARTY_DIR}/VulkanMemoryAllocator/include")
 # STB (header-only image/utility libraries)
 set(STB_INCLUDE_DIR "${THIRD_PARTY_DIR}/stb")
 
+# ImGui setup
+set(IMGUI_DIR "${THIRD_PARTY_DIR}/imgui")
+set(IMGUI_SOURCES
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_demo.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+
 # Add fmt library (needs compilation)
 add_subdirectory(${THIRD_PARTY_DIR}/fmt)
 
@@ -33,13 +45,15 @@ add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
 add_subdirectory(${THIRD_PARTY_DIR}/vk-bootstrap)
 
 # Create executable
-add_executable(VulkanEngine src/main.cpp)
+add_executable(VulkanEngine src/main.cpp ${IMGUI_SOURCES})
 
 # Include directories
 target_include_directories(VulkanEngine PRIVATE
         ${GLM_INCLUDE_DIR}
         ${VMA_INCLUDE_DIR}
         ${STB_INCLUDE_DIR}
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
         ${Vulkan_INCLUDE_DIRS}
 )
 

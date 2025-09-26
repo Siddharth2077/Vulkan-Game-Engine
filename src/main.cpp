@@ -9,6 +9,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
+
 int main() {
     // Test fmt
     fmt::print("Hello from fmt!\n");
@@ -47,6 +51,9 @@ int main() {
 
     // Test STB
     fmt::print("STB: stb_image version {}\n", STBI_VERSION);
+
+    // Test ImGui
+    fmt::print("ImGui: Successfully included ImGui version {}!\n", IMGUI_VERSION);
 
     // Clean up
     vkb::destroy_instance(vkb_inst);
