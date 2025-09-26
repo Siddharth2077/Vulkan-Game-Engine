@@ -13,6 +13,8 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
 
+#include <fastgltf/core.hpp>
+
 int main() {
     // Test fmt
     fmt::print("Hello from fmt!\n");
@@ -54,6 +56,10 @@ int main() {
 
     // Test ImGui
     fmt::print("ImGui: Successfully included ImGui version {}!\n", IMGUI_VERSION);
+
+    // Test fastgltf
+    fastgltf::Parser parser;
+    fmt::print("fastgltf: Successfully included fastgltf!\n");
 
     // Clean up
     vkb::destroy_instance(vkb_inst);

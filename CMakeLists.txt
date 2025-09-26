@@ -44,6 +44,9 @@ add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
 # Add vk-bootstrap library
 add_subdirectory(${THIRD_PARTY_DIR}/vk-bootstrap)
 
+# Add fastgltf library
+add_subdirectory(${THIRD_PARTY_DIR}/fastgltf)
+
 # Create executable
 add_executable(VulkanEngine src/main.cpp ${IMGUI_SOURCES})
 
@@ -62,5 +65,6 @@ target_link_libraries(VulkanEngine
         fmt::fmt
         SDL3::SDL3
         vk-bootstrap::vk-bootstrap
+        fastgltf
         ${Vulkan_LIBRARIES}
 )
