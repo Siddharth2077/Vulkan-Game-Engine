@@ -6,6 +6,9 @@
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 int main() {
     // Test fmt
     fmt::print("Hello from fmt!\n");
@@ -37,10 +40,13 @@ int main() {
     fmt::print("vk-bootstrap: Vulkan instance created successfully!\n");
     vkb::Instance vkb_inst = inst_ret.value();
 
-    // Test VMA (just check if we can create allocator info struct)
+    // Test VMA
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_1;
     fmt::print("VMA: Successfully included VulkanMemoryAllocator!\n");
+
+    // Test STB
+    fmt::print("STB: stb_image version {}\n", STBI_VERSION);
 
     // Clean up
     vkb::destroy_instance(vkb_inst);

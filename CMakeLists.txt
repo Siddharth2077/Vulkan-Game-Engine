@@ -20,6 +20,9 @@ set(GLM_INCLUDE_DIR "${THIRD_PARTY_DIR}/glm")
 # VMA (header-only memory allocator)
 set(VMA_INCLUDE_DIR "${THIRD_PARTY_DIR}/VulkanMemoryAllocator/include")
 
+# STB (header-only image/utility libraries)
+set(STB_INCLUDE_DIR "${THIRD_PARTY_DIR}/stb")
+
 # Add fmt library (needs compilation)
 add_subdirectory(${THIRD_PARTY_DIR}/fmt)
 
@@ -36,6 +39,7 @@ add_executable(VulkanEngine src/main.cpp)
 target_include_directories(VulkanEngine PRIVATE
         ${GLM_INCLUDE_DIR}
         ${VMA_INCLUDE_DIR}
+        ${STB_INCLUDE_DIR}
         ${Vulkan_INCLUDE_DIRS}
 )
 
