@@ -55,6 +55,14 @@ void VulkanEngine::init() {
 
 void VulkanEngine::cleanup() {
     if (_isInitialized) {
+        // Ensure that the GPU is done with all work
+        vkDeviceWaitIdle(_device);
+
+        for (int i{0}; i < FRAME_OVERLAP; i++) {
+            vkDestroyCommandPool(_device, _frames.at(i).commandPool, nullptr);
+            // The frame-buffers allocated from these pools will be automatically de-allocated.
+        }
+
         destroy_swapchain();
         vkDestroySurfaceKHR(_vulkanInstance, _surface, nullptr);
         vkDestroyDevice(_device, nullptr);
@@ -62,7 +70,6 @@ void VulkanEngine::cleanup() {
         vkDestroyInstance(_vulkanInstance, nullptr);
         SDL_DestroyWindow(_window);
     }
-
     // clear engine pointer
     loadedEngine = nullptr;
 }
@@ -137,7 +144,8 @@ void VulkanEngine::run() {
 void VulkanEngine::init_vulkan() {
     vkb::InstanceBuilder instanceBuilder;
     // Create the Vulkan instance with basic debug features
-    auto instance_ret = instanceBuilder.set_app_name("Vulkan Engine")
+    auto instance_ret = instanceBuilder
+        .set_app_name("Vulkan Engine")
         .request_validation_layers(bUseValidationLayers)
         .use_default_debug_messenger()
         .require_api_version(1, 3, 0)
@@ -191,7 +199,35 @@ void VulkanEngine::init_swapchain() {
 }
 
 void VulkanEngine::init_commands() {
-    // TODO
+    // Have the command-pool allow resetting of individual command buffers
+    VkCommandPoolCreateInfo command_pool_create_info{};
+    command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    command_pool_create_info.pNext = nullptr;
+    command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    command_pool_create_info.queueFamilyIndex = _graphicsQueueFamilyIndex;
+
+    for (int i{0}; i < FRAME_OVERLAP; i++) {
+        VkResult result = vkCreateCommandPool(_device, &command_pool_create_info, nullptr, &_frames.at(i).commandPool);
+        if (result != VK_SUCCESS) {
+            VK_LOG_ERROR("Failed to create command pool");
+            throw std::runtime_error("Failed to create command pool");
+        }
+
+        // Allocate the default command buffer for this frame, that will be used for rendering
+        VkCommandBufferAllocateInfo command_buffer_allocate_info{};
+        command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        command_buffer_allocate_info.pNext = nullptr;
+        command_buffer_allocate_info.commandPool = _frames.at(i).commandPool;
+        command_buffer_allocate_info.commandBufferCount = 1;
+        command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+
+        result = vkAllocateCommandBuffers(_device, &command_buffer_allocate_info, &_frames.at(i).mainCommandBuffer);
+        if (result != VK_SUCCESS) {
+            VK_LOG_ERROR("Failed to create command buffer");
+            throw std::runtime_error("Failed to create command buffer");
+        }
+    }
+
 }
 
 void VulkanEngine::init_sync_structures() {
