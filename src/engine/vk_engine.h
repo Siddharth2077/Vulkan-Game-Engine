@@ -12,6 +12,11 @@ constexpr unsigned int FRAME_OVERLAP {2};
 struct FrameData {
 	VkCommandPool commandPool;
 	VkCommandBuffer mainCommandBuffer;
+
+	// Synchronization mechanisms:
+	VkSemaphore swapchainImageAvailableSemaphore; // Signalled when swapchain image is made available for drawing
+	VkSemaphore renderFinishedSemaphore; // Signalled when rendering into the image is done
+	VkFence renderFence; // Signals the CPU that this current frame has finished rendering
 };
 
 

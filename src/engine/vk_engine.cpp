@@ -231,7 +231,35 @@ void VulkanEngine::init_commands() {
 }
 
 void VulkanEngine::init_sync_structures() {
-    // TODO
+    for (int i{0}; i < FRAME_OVERLAP; i++) {
+        // We want the Fence to start in the signalled state, so we can wait on it on the first frame.
+        VkFenceCreateInfo renderFenceCreateInfo{};
+        renderFenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        renderFenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        VkSemaphoreCreateInfo semaphoreCreateInfo{};
+        semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        // Create the Fence:
+        VkResult result = vkCreateFence(_device, &renderFenceCreateInfo, nullptr, &_frames.at(i).renderFence);
+        if (result != VK_SUCCESS) {
+            VK_LOG_ERROR("Failed to create render fence");
+            throw std::runtime_error("Failed to create render fence");
+        }
+
+        // Create the Semaphores:
+        result = vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames.at(i).swapchainImageAvailableSemaphore);
+        if (result != VK_SUCCESS) {
+            VK_LOG_ERROR("Failed to create swapchain image available semaphore");
+            throw std::runtime_error("Failed to create swapchain image available semaphore");
+        }
+
+        result = vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames.at(i).renderFinishedSemaphore);
+        if (result != VK_SUCCESS) {
+            VK_LOG_ERROR("Failed to create render finished semaphore");
+            throw std::runtime_error("Failed to create render finished semaphore");
+        }
+    }
 }
 
 void VulkanEngine::create_swapchain(uint32_t width, uint32_t height) {
