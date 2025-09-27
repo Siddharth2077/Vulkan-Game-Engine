@@ -137,23 +137,26 @@ void VulkanEngine::draw() {
     // 1) Command buffer is now ready for recording commands onto it...
     //
 
-    // Transition the swapchain-image layout into a write-able layout before rendering:
+    // OPTIMIZED: Transition the swapchain-image layout for clearing
     VkImageMemoryBarrier2 imageMemoryBarrier {};
     imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     imageMemoryBarrier.pNext = nullptr;
-    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    imageMemoryBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    imageMemoryBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+
+    // OPTIMIZATION: Be specific about stages and access
+    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;  // No previous work to wait for
+    imageMemoryBarrier.srcAccessMask = 0;  // No previous access to synchronize
+    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // Specific to clear operations
+    imageMemoryBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;  // Clear is a transfer operation
+
     imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;  // Optimal for clear operations
 
     VkImageSubresourceRange imageSubresourceRange {};
     imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceRange.baseMipLevel = 0;
-    imageSubresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    imageSubresourceRange.levelCount = 1;  // OPTIMIZATION: Swapchain images have only 1 mip level
     imageSubresourceRange.baseArrayLayer = 0;
-    imageSubresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    imageSubresourceRange.layerCount = 1;  // OPTIMIZATION: Swapchain images have only 1 array layer
 
     imageMemoryBarrier.subresourceRange = imageSubresourceRange;
     imageMemoryBarrier.image = _swapchainImages.at(swapchainImageIndex);
@@ -171,10 +174,14 @@ void VulkanEngine::draw() {
     VkClearColorValue clearColorValue {};
     float flash = std::abs(std::sin(_frameNumber / 120.f));
     clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
-    vkCmdClearColorImage(commandBuffer, _swapchainImages.at(swapchainImageIndex), VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
+    vkCmdClearColorImage(commandBuffer, _swapchainImages.at(swapchainImageIndex), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColorValue, 1, &imageSubresourceRange);
 
-    // Transition the image layout to a presentable layout:
-    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    // OPTIMIZED: Transition the image layout to presentable layout
+    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // Wait for clear to finish
+    imageMemoryBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;  // Clear wrote to the image
+    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;  // No specific stage needs it after
+    imageMemoryBarrier.dstAccessMask = 0;  // No specific access needed after transition
+    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     // Place a pipeline barrier to transition the image layout
@@ -197,6 +204,8 @@ void VulkanEngine::draw() {
     commandBufferSubmitInfo.pNext = nullptr;
     commandBufferSubmitInfo.commandBuffer = commandBuffer;
     commandBufferSubmitInfo.deviceMask = 0;
+
+    // OPTIMIZED: More specific semaphore synchronization
     // We want to wait on the swapchain-image-available semaphore, as that is signalled when the swapchain is ready
     VkSemaphoreSubmitInfo waitSemaphoreInfo {};
     waitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
@@ -204,7 +213,8 @@ void VulkanEngine::draw() {
     waitSemaphoreInfo.deviceIndex = 0;
     waitSemaphoreInfo.value = 1;
     waitSemaphoreInfo.semaphore = get_current_frame().swapchainImageAvailableSemaphore;
-    waitSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR;
+    waitSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // OPTIMIZATION: Wait specifically for clear stage
+
     // We want to signal the render-finished semaphore, to signal that rendering has finished
     VkSemaphoreSubmitInfo signalSemaphoreInfo {};
     signalSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
@@ -212,7 +222,7 @@ void VulkanEngine::draw() {
     signalSemaphoreInfo.deviceIndex = 0;
     signalSemaphoreInfo.value = 1;
     signalSemaphoreInfo.semaphore = get_current_frame().renderFinishedSemaphore;
-    signalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+    signalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // OPTIMIZATION: Signal after clear is done
 
     // Pass all the submission info to VkSubmitInfo2 struct
     VkSubmitInfo2 cmdSubmitInfo{};
@@ -255,6 +265,9 @@ void VulkanEngine::draw() {
 
     // Increment the frame number drawn:
     ++_frameNumber;
+
+    // Ensures that the presentation engine is done presenting the image, before proceeding...
+    vkQueueWaitIdle(_graphicsQueue);
 }
 
 void VulkanEngine::run() {
