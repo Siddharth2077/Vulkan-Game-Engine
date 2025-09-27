@@ -2,5 +2,13 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/SDL3" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/VulkanMemoryAllocator" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/fastgltf" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/fmt" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/imgui" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/stb" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/vk-bootstrap" vcs="Git" />
   </component>
 </project>

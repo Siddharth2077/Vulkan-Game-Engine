@@ -48,7 +48,8 @@ add_subdirectory(${THIRD_PARTY_DIR}/vk-bootstrap)
 add_subdirectory(${THIRD_PARTY_DIR}/fastgltf)
 
 # Create executable
-add_executable(VulkanEngine src/main.cpp ${IMGUI_SOURCES})
+file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.h")
+add_executable(VulkanEngine ${SOURCES} ${IMGUI_SOURCES})
 
 # Include directories
 target_include_directories(VulkanEngine PRIVATE
