@@ -9,6 +9,7 @@
 #include "vk_logger.h"
 
 constexpr bool bUseValidationLayers {true};
+constexpr uint64_t ENGINE_TIMEOUT_1_SECOND {1000000000};
 
 // Global pointer to the Singleton Instance of the engine.
 VulkanEngine* loadedEngine = nullptr;
@@ -60,7 +61,12 @@ void VulkanEngine::cleanup() {
 
         for (int i{0}; i < FRAME_OVERLAP; i++) {
             vkDestroyCommandPool(_device, _frames.at(i).commandPool, nullptr);
-            // The frame-buffers allocated from these pools will be automatically de-allocated.
+            // The frame-buffers allocated from these pools will be automatically de-allocated...
+
+            // Destroy synchronization objects
+            vkDestroyFence(_device, _frames.at(i).renderFence, nullptr);
+            vkDestroySemaphore(_device, _frames.at(i).swapchainImageAvailableSemaphore, nullptr);
+            vkDestroySemaphore(_device, _frames.at(i).renderFinishedSemaphore, nullptr);
         }
 
         destroy_swapchain();
@@ -75,7 +81,180 @@ void VulkanEngine::cleanup() {
 }
 
 void VulkanEngine::draw() {
-    // nothing yet
+    // Wait for the GPU to finish rendering the last frame (timeout of 1s)
+    VkResult result = vkWaitForFences(_device, 1, &get_current_frame().renderFence, VK_TRUE, ENGINE_TIMEOUT_1_SECOND);
+    if (result != VK_SUCCESS) {
+        if (result == VK_TIMEOUT) {
+            VK_LOG_WARN("VK_TIMEOUT - vkWaitForFences - Render Fence");
+        }
+        else {
+            VK_LOG_ERROR("vkWaitForFences failed");
+            throw std::runtime_error("vkWaitForFences failed");
+        }
+    }
+
+    // Reset the render fence
+    result = vkResetFences(_device, 1, &get_current_frame().renderFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkResetFences failed");
+        throw std::runtime_error("vkResetFences failed");
+    }
+
+    // Request the index of an available image from the Swapchain (timeout of 1s)
+    uint32_t swapchainImageIndex{};
+    result = vkAcquireNextImageKHR(_device, _swapchain, ENGINE_TIMEOUT_1_SECOND, get_current_frame().swapchainImageAvailableSemaphore, VK_NULL_HANDLE, &swapchainImageIndex);
+    if (result != VK_SUCCESS) {
+        if (result == VK_TIMEOUT) {
+            VK_LOG_WARN("VK_TIMEOUT - vkAcquireNextImageKHR");
+        }
+        else if (result == VK_NOT_READY) {
+            VK_LOG_ERROR("VK_NOT_READY - vkAcquireNextImageKHR");
+        }
+        else if (result == VK_SUBOPTIMAL_KHR) {
+            VK_LOG_ERROR("VK_SUBOPTIMAL_KHR - vkAcquireNextImageKHR");
+        }
+    }
+
+    // Reset the current frame's command-buffer
+    VkCommandBuffer commandBuffer = get_current_frame().mainCommandBuffer;
+    result = vkResetCommandBuffer(commandBuffer, 0);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkResetCommandBuffer failed");
+        throw std::runtime_error("vkResetCommandBuffer failed");
+    }
+
+    // Begin the command buffer recording
+    VkCommandBufferBeginInfo commandBufferBeginInfo {};
+    commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkBeginCommandBuffer failed");
+        throw std::runtime_error("vkBeginCommandBuffer failed");
+    }
+
+    //
+    // 1) Command buffer is now ready for recording commands onto it...
+    //
+
+    // Transition the swapchain-image layout into a write-able layout before rendering:
+    VkImageMemoryBarrier2 imageMemoryBarrier {};
+    imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    imageMemoryBarrier.pNext = nullptr;
+    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    imageMemoryBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    imageMemoryBarrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkImageSubresourceRange imageSubresourceRange {};
+    imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageSubresourceRange.baseMipLevel = 0;
+    imageSubresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    imageSubresourceRange.baseArrayLayer = 0;
+    imageSubresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+    imageMemoryBarrier.subresourceRange = imageSubresourceRange;
+    imageMemoryBarrier.image = _swapchainImages.at(swapchainImageIndex);
+
+    VkDependencyInfo dependencyInfo {};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependencyInfo.pNext = nullptr;
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &imageMemoryBarrier;
+
+    // Place a pipeline barrier to transition the image layout
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+
+    // Clear the image to a clear-color:
+    VkClearColorValue clearColorValue {};
+    float flash = std::abs(std::sin(_frameNumber / 120.f));
+    clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
+    vkCmdClearColorImage(commandBuffer, _swapchainImages.at(swapchainImageIndex), VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
+
+    // Transition the image layout to a presentable layout:
+    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    // Place a pipeline barrier to transition the image layout
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+
+    // End recording the command buffer
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkEndCommandBuffer failed");
+        throw std::runtime_error("vkEndCommandBuffer failed");
+    }
+
+    //
+    // 2) We're now ready to submit the commands, along with the synchronization mechanisms to the queue...
+    //
+
+    // Prepare for submission to the queue:
+    VkCommandBufferSubmitInfo commandBufferSubmitInfo {};
+    commandBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    commandBufferSubmitInfo.pNext = nullptr;
+    commandBufferSubmitInfo.commandBuffer = commandBuffer;
+    commandBufferSubmitInfo.deviceMask = 0;
+    // We want to wait on the swapchain-image-available semaphore, as that is signalled when the swapchain is ready
+    VkSemaphoreSubmitInfo waitSemaphoreInfo {};
+    waitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemaphoreInfo.pNext = nullptr;
+    waitSemaphoreInfo.deviceIndex = 0;
+    waitSemaphoreInfo.value = 1;
+    waitSemaphoreInfo.semaphore = get_current_frame().swapchainImageAvailableSemaphore;
+    waitSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR;
+    // We want to signal the render-finished semaphore, to signal that rendering has finished
+    VkSemaphoreSubmitInfo signalSemaphoreInfo {};
+    signalSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalSemaphoreInfo.pNext = nullptr;
+    signalSemaphoreInfo.deviceIndex = 0;
+    signalSemaphoreInfo.value = 1;
+    signalSemaphoreInfo.semaphore = get_current_frame().renderFinishedSemaphore;
+    signalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+
+    // Pass all the submission info to VkSubmitInfo2 struct
+    VkSubmitInfo2 cmdSubmitInfo{};
+    cmdSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    cmdSubmitInfo.pNext = nullptr;
+    cmdSubmitInfo.commandBufferInfoCount = 1;
+    cmdSubmitInfo.pCommandBufferInfos = &commandBufferSubmitInfo;
+    cmdSubmitInfo.waitSemaphoreInfoCount = 1;
+    cmdSubmitInfo.pWaitSemaphoreInfos = &waitSemaphoreInfo;
+    cmdSubmitInfo.signalSemaphoreInfoCount = 1;
+    cmdSubmitInfo.pSignalSemaphoreInfos = &signalSemaphoreInfo;
+
+    // Submit the command buffer to the queue for execution:
+    // render-fence will now be blocked until these graphics commands finish execution
+    result = vkQueueSubmit2(_graphicsQueue, 1, &cmdSubmitInfo, get_current_frame().renderFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkQueueSubmit2 failed");
+        throw std::runtime_error("vkQueueSubmit2 failed");
+    }
+
+    //
+    // 3) We now present the image that finished rendering in the previous step...
+    //
+
+    // Prepare for presentation:
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.pNext = nullptr;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &_swapchain;
+    presentInfo.pImageIndices = &swapchainImageIndex;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &get_current_frame().renderFinishedSemaphore;
+
+    result = vkQueuePresentKHR(_graphicsQueue, &presentInfo);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("vkQueuePresentKHR failed");
+        throw std::runtime_error("vkQueuePresentKHR failed");
+    }
+
+    // Increment the frame number drawn:
+    ++_frameNumber;
 }
 
 void VulkanEngine::run() {
@@ -100,7 +279,6 @@ void VulkanEngine::run() {
 
             // SDL3: Key events are now SDL_EVENT_KEY_DOWN
             if (e.type == SDL_EVENT_KEY_DOWN) {
-                // SDL3: Use e.key.scancode directly (no .keysym needed)
                 switch (e.key.scancode) {
                     // If ESCAPE key was pressed, quit the application
                     case SDL_SCANCODE_ESCAPE:
@@ -284,6 +462,6 @@ void VulkanEngine::destroy_swapchain() {
     vkDestroySwapchainKHR(_device, _swapchain, nullptr);
     // Destroying the swapchain will delete the images it holds internally.
     for (size_t i{0}; i < _swapchainImageViews.size(); i++) {
-        vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
+        vkDestroyImageView(_device, _swapchainImageViews.at(i), nullptr);
     }
 }
