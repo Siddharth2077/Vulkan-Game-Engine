@@ -1,4 +1,6 @@
-﻿#include "vk_engine.h"
+﻿#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+#include "vk_engine.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include "vk_initializers.h"
@@ -6,6 +8,8 @@
 #include <chrono>
 #include <thread>
 #include <VkBootstrap.h>
+
+#include "vk_images.h"
 #include "vk_logger.h"
 
 constexpr bool bUseValidationLayers {true};
@@ -67,7 +71,11 @@ void VulkanEngine::cleanup() {
             vkDestroyFence(_device, _frames.at(i).renderFence, nullptr);
             vkDestroySemaphore(_device, _frames.at(i).swapchainImageAvailableSemaphore, nullptr);
             vkDestroySemaphore(_device, _frames.at(i).renderFinishedSemaphore, nullptr);
+
+            _frames.at(i).deletionQueue.flush();
         }
+        // Flush the global deletion queue
+        _mainDeletionQueue.flush();
 
         destroy_swapchain();
         vkDestroySurfaceKHR(_vulkanInstance, _surface, nullptr);
@@ -92,6 +100,9 @@ void VulkanEngine::draw() {
             throw std::runtime_error("vkWaitForFences failed");
         }
     }
+
+    // Delete the resources of the current frame, since it's done rendering.
+    get_current_frame().deletionQueue.flush();
 
     // Reset the render fence
     result = vkResetFences(_device, 1, &get_current_frame().renderFence);
@@ -135,59 +146,87 @@ void VulkanEngine::draw() {
 
     //
     // 1) Command buffer is now ready for recording commands onto it...
-    //
+    // NEW CODE: We use the draw-image to render, and blit-copy it into the swapchain-image for presentation
 
-    // OPTIMIZED: Transition the swapchain-image layout for clearing
-    VkImageMemoryBarrier2 imageMemoryBarrier {};
-    imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    imageMemoryBarrier.pNext = nullptr;
+    // Re-set the draw-extent (width and height) each frame
+    _drawImageExtent.width = _drawImage.imageExtent.width;
+    _drawImageExtent.height = _drawImage.imageExtent.height;
 
-    // OPTIMIZATION: Be specific about stages and access
-    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;  // No previous work to wait for
-    imageMemoryBarrier.srcAccessMask = 0;  // No previous access to synchronize
-    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // Specific to clear operations
-    imageMemoryBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;  // Clear is a transfer operation
+    // OPTIMIZED: Transition draw-image for clearing
+    // From undefined (don't care) to general (for clear operation)
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _drawImage.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,        // No previous work to wait for
+        0,                                          // No previous access to sync
+        VK_PIPELINE_STAGE_2_CLEAR_BIT,              // Wait for clear stage
+        VK_ACCESS_2_TRANSFER_WRITE_BIT              // Clear operation writes
+    );
 
-    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;  // Optimal for clear operations
-
+    // Clear the image to a clear-color:
     VkImageSubresourceRange imageSubresourceRange {};
     imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceRange.baseMipLevel = 0;
-    imageSubresourceRange.levelCount = 1;  // OPTIMIZATION: Swapchain images have only 1 mip level
+    imageSubresourceRange.levelCount = 1;
     imageSubresourceRange.baseArrayLayer = 0;
-    imageSubresourceRange.layerCount = 1;  // OPTIMIZATION: Swapchain images have only 1 array layer
+    imageSubresourceRange.layerCount = 1;
 
-    imageMemoryBarrier.subresourceRange = imageSubresourceRange;
-    imageMemoryBarrier.image = _swapchainImages.at(swapchainImageIndex);
-
-    VkDependencyInfo dependencyInfo {};
-    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dependencyInfo.pNext = nullptr;
-    dependencyInfo.imageMemoryBarrierCount = 1;
-    dependencyInfo.pImageMemoryBarriers = &imageMemoryBarrier;
-
-    // Place a pipeline barrier to transition the image layout
-    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
-
-    // Clear the image to a clear-color:
     VkClearColorValue clearColorValue {};
     float flash = std::abs(std::sin(_frameNumber / 120.f));
     clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
-    vkCmdClearColorImage(commandBuffer, _swapchainImages.at(swapchainImageIndex), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColorValue, 1, &imageSubresourceRange);
+    vkCmdClearColorImage(commandBuffer, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
 
-    // OPTIMIZED: Transition the image layout to presentable layout
-    imageMemoryBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // Wait for clear to finish
-    imageMemoryBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;  // Clear wrote to the image
-    imageMemoryBarrier.dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;  // No specific stage needs it after
-    imageMemoryBarrier.dstAccessMask = 0;  // No specific access needed after transition
-    imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // OPTIMIZED: Transition draw-image for blit source
+    // From general (after clear) to transfer source optimal
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _drawImage.image,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_2_CLEAR_BIT,            // Wait for clear to finish
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,           // Clear wrote to image
+        VK_PIPELINE_STAGE_2_BLIT_BIT,             // Prepare for blit
+        VK_ACCESS_2_TRANSFER_READ_BIT             // Blit will read from image
+    );
 
-    // Place a pipeline barrier to transition the image layout
-    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    // OPTIMIZED: Transition swapchain image for blit destination
+    // From undefined (don't care) to transfer destination optimal
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _swapchainImages.at(swapchainImageIndex),
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,        // No previous work to wait for
+        0,                                          // No previous access to sync
+        VK_PIPELINE_STAGE_2_BLIT_BIT,               // Prepare for blit
+        VK_ACCESS_2_TRANSFER_WRITE_BIT              // Blit will write to image
+    );
 
-    // End recording the command buffer
+    // Blit-copy from the draw-image to the swapchain-image to prepare it for presentation:
+    vkutil::blit_image_to_image(
+        commandBuffer,
+        _drawImage.image,
+        _swapchainImages.at(swapchainImageIndex),
+        _drawImageExtent,
+        _swapchainExtent
+    );
+
+    // OPTIMIZED: Transition swapchain image for presentation
+    // From transfer destination (after blit) to present source
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _swapchainImages.at(swapchainImageIndex),
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_2_BLIT_BIT,               // Wait for blit to finish
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,             // Blit wrote to image
+        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,     // No specific stage needs it after
+        0                                           // No specific access needed
+    );
+
+    // Finish recording the command buffer
     result = vkEndCommandBuffer(commandBuffer);
     if (result != VK_SUCCESS) {
         VK_LOG_ERROR("vkEndCommandBuffer failed");
@@ -205,24 +244,23 @@ void VulkanEngine::draw() {
     commandBufferSubmitInfo.commandBuffer = commandBuffer;
     commandBufferSubmitInfo.deviceMask = 0;
 
-    // OPTIMIZED: More specific semaphore synchronization
-    // We want to wait on the swapchain-image-available semaphore, as that is signalled when the swapchain is ready
+    // OPTIMIZED: Wait for swapchain image availability at transfer stage
     VkSemaphoreSubmitInfo waitSemaphoreInfo {};
     waitSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     waitSemaphoreInfo.pNext = nullptr;
     waitSemaphoreInfo.deviceIndex = 0;
     waitSemaphoreInfo.value = 1;
     waitSemaphoreInfo.semaphore = get_current_frame().swapchainImageAvailableSemaphore;
-    waitSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // OPTIMIZATION: Wait specifically for clear stage
+    waitSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;  // Wait for blit operations
 
-    // We want to signal the render-finished semaphore, to signal that rendering has finished
+    // OPTIMIZED: Signal when all transfer operations complete
     VkSemaphoreSubmitInfo signalSemaphoreInfo {};
     signalSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     signalSemaphoreInfo.pNext = nullptr;
     signalSemaphoreInfo.deviceIndex = 0;
     signalSemaphoreInfo.value = 1;
     signalSemaphoreInfo.semaphore = get_current_frame().renderFinishedSemaphore;
-    signalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;  // OPTIMIZATION: Signal after clear is done
+    signalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;  // Signal after blit completes
 
     // Pass all the submission info to VkSubmitInfo2 struct
     VkSubmitInfo2 cmdSubmitInfo{};
@@ -313,6 +351,7 @@ void VulkanEngine::run() {
     }
 }
 
+
 /// @brief Initializes the core Vulkan components using vk-bootstrap library.
 ///
 /// This function sets up the complete Vulkan foundation required for rendering:
@@ -383,10 +422,80 @@ void VulkanEngine::init_vulkan() {
     // Store the handle to a graphics-queue and its queue family index
     _graphicsQueue = vkb_device.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamilyIndex = vkb_device.get_queue_index(vkb::QueueType::graphics).value();
+
+    // Initialize VMA allocator
+    init_vulkan_memory_allocator();
 }
 
 void VulkanEngine::init_swapchain() {
+    // Create the swapchain
     create_swapchain(_windowExtent.width, _windowExtent.height);
+
+    // Allocate the image that we will be drawing into, in our draw loop:
+    // The image size of the drawing-image will match the window size
+    VkExtent3D drawImageExtent {_windowExtent.width, _windowExtent.height, 1};
+
+    // Hardcoding the draw format to 16-bit float (rgba)
+    _drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    _drawImage.imageExtent = drawImageExtent;
+
+    // Specify the usages of the draw-image
+    VkImageUsageFlags drawImageUsageFlags{};
+    drawImageUsageFlags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    drawImageUsageFlags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    drawImageUsageFlags |= VK_IMAGE_USAGE_STORAGE_BIT;
+    drawImageUsageFlags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+    // We're now ready to allocate the draw-image...
+    VkImageCreateInfo drawImageCreateInfo{};
+    drawImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    drawImageCreateInfo.pNext = nullptr;
+    drawImageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    drawImageCreateInfo.format = _drawImage.imageFormat;
+    drawImageCreateInfo.extent = _drawImage.imageExtent;
+    drawImageCreateInfo.mipLevels = 1;
+    drawImageCreateInfo.arrayLayers = 1;
+    drawImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT; // For MSAA. Will not be using it now.
+    drawImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    drawImageCreateInfo.usage = drawImageUsageFlags;
+    // Specify the allocation of the draw-image to be from GPU-local memory using the VMA allocator
+    VmaAllocationCreateInfo drawImageAllocationCreateInfo{};
+    drawImageAllocationCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    drawImageAllocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    // Allocate and create the image
+    VkResult result = vmaCreateImage(_vmaAllocator, &drawImageCreateInfo, &drawImageAllocationCreateInfo, &_drawImage.image, &_drawImage.vmaAllocation, nullptr);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create draw image!");
+        throw std::runtime_error("Failed to create draw image!");
+    }
+    VK_LOG_SUCCESS("Draw image created");
+
+    // Build an image-view of the draw-image to use for rendering:
+    VkImageViewCreateInfo drawImageViewCreateInfo{};
+    drawImageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    drawImageViewCreateInfo.pNext = nullptr;
+    drawImageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    drawImageViewCreateInfo.image = _drawImage.image;
+    drawImageViewCreateInfo.format = _drawImage.imageFormat;
+    drawImageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+    drawImageViewCreateInfo.subresourceRange.levelCount = 1;
+    drawImageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    drawImageViewCreateInfo.subresourceRange.layerCount = 1;
+    drawImageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    // Create the image-view:
+    result = vkCreateImageView(_device, &drawImageViewCreateInfo, nullptr, &_drawImage.imageView);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create draw image-view!");
+        throw std::runtime_error("Failed to create draw image-view!");
+    }
+    VK_LOG_SUCCESS("Draw image-view created");
+
+
+    // Add to main deletion queue:
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyImageView(_device, _drawImage.imageView, nullptr);
+        vmaDestroyImage(_vmaAllocator, _drawImage.image, _drawImage.vmaAllocation);
+    });
 }
 
 void VulkanEngine::init_commands() {
@@ -451,6 +560,25 @@ void VulkanEngine::init_sync_structures() {
             throw std::runtime_error("Failed to create render finished semaphore");
         }
     }
+}
+
+void VulkanEngine::init_vulkan_memory_allocator() {
+    VmaAllocatorCreateInfo allocator_create_info{};
+    allocator_create_info.instance = _vulkanInstance;
+    allocator_create_info.physicalDevice = _physicalDevice;
+    allocator_create_info.device = _device;
+    allocator_create_info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT; // Lets use GPU pointers
+
+    VkResult result = vmaCreateAllocator(&allocator_create_info, &_vmaAllocator);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create VMA allocator");
+        throw std::runtime_error("Failed to create VMA allocator");
+    }
+    VK_LOG_SUCCESS("Created VMA allocator");
+
+    _mainDeletionQueue.push_deleter([&]() {
+        vmaDestroyAllocator(_vmaAllocator);
+    });
 }
 
 void VulkanEngine::create_swapchain(uint32_t width, uint32_t height) {
