@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "vk_types.h"
+#include "vk_descriptors.h"
 
 
 /// @brief For double-buffering our commands.
@@ -102,14 +103,26 @@ private:
 	AllocatedImage _drawImage;
 	VkExtent2D _drawImageExtent;
 
+	// Descriptor-Sets
+	DescriptorSetAllocator _globalDescriptorSetAllocator;
+	VkDescriptorSet _drawImageDescriptorSet;
+	VkDescriptorSetLayout _drawImageDescriptorSetLayout;
+
+	// Pipelines
+	VkPipeline _backgroundImgPipeline;
+	VkPipelineLayout _backgroundImgPipelineLayout;
+
 
 	// Initialization helper methods
 	void init_vulkan();
 	void init_swapchain();
 	void init_commands();
 	void init_sync_structures();
+	void init_pipelines();
 
 	void init_vulkan_memory_allocator();
+	void init_descriptors();
+	void init_background_img_pipeline();
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();

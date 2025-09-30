@@ -11,6 +11,7 @@
 
 #include "vk_images.h"
 #include "vk_logger.h"
+#include "vk_pipelines.h"
 
 constexpr bool bUseValidationLayers {true};
 constexpr uint64_t ENGINE_TIMEOUT_1_SECOND {1000000000};
@@ -52,6 +53,8 @@ void VulkanEngine::init() {
     init_swapchain();
     init_commands();
     init_sync_structures();
+    init_descriptors();
+    init_pipelines();
 
     // Everything went fine
     _isInitialized = true;
@@ -152,7 +155,7 @@ void VulkanEngine::draw() {
     _drawImageExtent.width = _drawImage.imageExtent.width;
     _drawImageExtent.height = _drawImage.imageExtent.height;
 
-    // OPTIMIZED: Transition draw-image for clearing
+    // OPTIMIZED: Transition draw-image for writing into it
     // From undefined (don't care) to general (for clear operation)
     vkutil::transition_image_layout(
         commandBuffer,
@@ -165,7 +168,7 @@ void VulkanEngine::draw() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT              // Clear operation writes
     );
 
-    // Clear the image to a clear-color:
+    // Draw into the image using a compute-shader:
     VkImageSubresourceRange imageSubresourceRange {};
     imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceRange.baseMipLevel = 0;
@@ -173,10 +176,17 @@ void VulkanEngine::draw() {
     imageSubresourceRange.baseArrayLayer = 0;
     imageSubresourceRange.layerCount = 1;
 
-    VkClearColorValue clearColorValue {};
-    float flash = std::abs(std::sin(_frameNumber / 120.f));
-    clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
-    vkCmdClearColorImage(commandBuffer, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
+    // VkClearColorValue clearColorValue {};
+    // float flash = std::abs(std::sin(_frameNumber / 120.f));
+    // clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
+    // vkCmdClearColorImage(commandBuffer, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
+
+    // Bind the pipeline for drawing with compute
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipeline);
+    // Bind the descriptor sets
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipelineLayout, 0, 1, &_drawImageDescriptorSet, 0, nullptr);
+    // Execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it to get total group-counts needed along X and Y
+    vkCmdDispatch(commandBuffer, std::ceil(_drawImageExtent.width / 16.0), std::ceil(_drawImageExtent.height / 16.0), 1);
 
     // OPTIMIZED: Transition draw-image for blit source
     // From general (after clear) to transfer source optimal
@@ -562,6 +572,10 @@ void VulkanEngine::init_sync_structures() {
     }
 }
 
+void VulkanEngine::init_pipelines() {
+    init_background_img_pipeline();
+}
+
 void VulkanEngine::init_vulkan_memory_allocator() {
     VmaAllocatorCreateInfo allocator_create_info{};
     allocator_create_info.instance = _vulkanInstance;
@@ -578,6 +592,105 @@ void VulkanEngine::init_vulkan_memory_allocator() {
 
     _mainDeletionQueue.push_deleter([&]() {
         vmaDestroyAllocator(_vmaAllocator);
+    });
+}
+
+void VulkanEngine::init_descriptors() {
+    // We'll create a descriptor-pool that will hold 10 sets of 1 descriptor each of type storage-image
+    std::vector<DescriptorSetAllocator::PoolSizeRatio> sizeRatios = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}
+    };
+
+    // Max 10 Descriptor-Sets
+    // 10 Descriptors - all of them of type VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+    _globalDescriptorSetAllocator.init_descriptor_pool(_device, 10, sizeRatios);
+
+    // Make the descriptor-set-layout for the compute-draw
+    // Each Descriptor-Set will only have 1 Descriptor of type VK_DESCRIPTOR_TYPE_STORAGE_IMAGE at binding 0
+    {
+        DescriptorLayoutBuilder layoutBuilder{};
+        layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        _drawImageDescriptorSetLayout = layoutBuilder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+    }
+
+
+    // Allocate 1 descriptor-set for our draw-image:
+    _drawImageDescriptorSet = _globalDescriptorSetAllocator.allocate_descriptor_set(_device, _drawImageDescriptorSetLayout);
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    imageInfo.imageView = _drawImage.imageView;
+
+    VkWriteDescriptorSet drawImageWrite{};
+    drawImageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    drawImageWrite.pNext = nullptr;
+    drawImageWrite.dstSet = _drawImageDescriptorSet;
+    drawImageWrite.descriptorCount = 1;
+    drawImageWrite.dstBinding = 0;
+    drawImageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    drawImageWrite.pImageInfo = &imageInfo;
+
+    // Update the draw-image's descriptor-set with the info. regarding the image
+    vkUpdateDescriptorSets(_device, 1, &drawImageWrite, 0, nullptr);
+
+    // Ensuring that the global descriptor-set allocator and the layout gets cleaned up
+    _mainDeletionQueue.push_deleter([&]() {
+        _globalDescriptorSetAllocator.destroy_descriptor_pool(_device);
+        vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorSetLayout, nullptr);
+    });
+}
+
+void VulkanEngine::init_background_img_pipeline() {
+    // Create the Pipeline-Layout
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.pNext = nullptr;
+    pipelineLayoutCreateInfo.pSetLayouts = &_drawImageDescriptorSetLayout;
+    pipelineLayoutCreateInfo.setLayoutCount = 1;
+
+    VkResult result = vkCreatePipelineLayout(_device, &pipelineLayoutCreateInfo, nullptr, &_backgroundImgPipelineLayout);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create pipeline-layout for background-img draw");
+        throw std::runtime_error("Failed to create pipeline-layout for background-img draw");
+    }
+    VK_LOG_SUCCESS("Created pipeline-layout for background-img draw");
+
+    // Create the Compute-Pipeline
+    // Load the SpirV compiled compute-shader
+    VkShaderModule computeDrawShaderModule;
+    if (!vkutil::load_shader_module(_device, &computeDrawShaderModule, "./shaders/gradient.comp.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: gradient.comp.spv");
+        throw std::runtime_error("Failed to load SpirV shader: gradient.comp.spv");
+    }
+    VK_LOG_INFO("Loaded SpirV shader: gradient.comp.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: gradient.comp.spv");
+
+    VkPipelineShaderStageCreateInfo pipelineShaderStageInfo{};
+    pipelineShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipelineShaderStageInfo.pNext = nullptr;
+    pipelineShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineShaderStageInfo.module = computeDrawShaderModule;
+    pipelineShaderStageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo computePipelineCreateInfo{};
+    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    computePipelineCreateInfo.pNext = nullptr;
+    computePipelineCreateInfo.layout = _backgroundImgPipelineLayout;
+    computePipelineCreateInfo.stage = pipelineShaderStageInfo;
+
+    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &_backgroundImgPipeline);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create compute pipeline");
+        throw std::runtime_error("Failed to create compute pipeline");
+    }
+    VK_LOG_SUCCESS("Created compute pipeline");
+
+
+    // Schedule cleanup
+    vkDestroyShaderModule(_device, computeDrawShaderModule, nullptr);  // We no longer need it after creating the pipeline
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyPipelineLayout(_device, _backgroundImgPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _backgroundImgPipeline, nullptr);
     });
 }
 

@@ -37,7 +37,47 @@ VkDescriptorSetLayout DescriptorLayoutBuilder::build(VkDevice device, VkShaderSt
         VK_LOG_ERROR("Failed to create descriptor set-layout!");
         throw std::runtime_error("Failed to create descriptor set-layout!");
     }
-    VK_LOG_SUCCESS("Created descriptor set-layout");
+    VK_LOG_SUCCESS("Created descriptor-set-layout");
+
+#ifndef NDEBUG
+    // Display the Descriptor-Set-Layout created
+    VK_LOG_INFO("Descriptor Set Layout Details:");
+    VK_LOG_INFO("  Total Bindings: {}", layout_bindings.size());
+
+    for (size_t i = 0; i < layout_bindings.size(); i++) {
+        const auto& binding = layout_bindings[i];
+
+        // Get descriptor type name
+        std::string typeName;
+        switch (binding.descriptorType) {
+            case VK_DESCRIPTOR_TYPE_SAMPLER: typeName = "SAMPLER"; break;
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: typeName = "COMBINED_IMAGE_SAMPLER"; break;
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: typeName = "SAMPLED_IMAGE"; break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: typeName = "STORAGE_IMAGE"; break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: typeName = "UNIFORM_BUFFER"; break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: typeName = "STORAGE_BUFFER"; break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: typeName = "UNIFORM_BUFFER_DYNAMIC"; break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: typeName = "STORAGE_BUFFER_DYNAMIC"; break;
+            case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: typeName = "INPUT_ATTACHMENT"; break;
+            default: typeName = "UNKNOWN"; break;
+        }
+
+        // Get stage flags
+        std::string stages;
+        if (binding.stageFlags & VK_SHADER_STAGE_VERTEX_BIT) stages += "VERTEX ";
+        if (binding.stageFlags & VK_SHADER_STAGE_FRAGMENT_BIT) stages += "FRAGMENT ";
+        if (binding.stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) stages += "COMPUTE ";
+        if (binding.stageFlags & VK_SHADER_STAGE_GEOMETRY_BIT) stages += "GEOMETRY ";
+        if (binding.stageFlags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) stages += "TESS_CONTROL ";
+        if (binding.stageFlags & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) stages += "TESS_EVAL ";
+        if (stages.empty()) stages = "NONE";
+
+        VK_LOG_INFO("  Binding {}:", binding.binding);
+        VK_LOG_INFO("    Type: {}", typeName);
+        VK_LOG_INFO("    Count: {}", binding.descriptorCount);
+        VK_LOG_INFO("    Stages: {}", stages);
+    }
+#endif
 
     return descriptor_set_layout;
 }
@@ -93,7 +133,7 @@ VkDescriptorSet DescriptorSetAllocator::allocate_descriptor_set(VkDevice device,
     allocate_info.pSetLayouts = &descriptor_set_layout;
 
     VkDescriptorSet descriptor_set {VK_NULL_HANDLE};
-    VkResult result = vkAllocateDescriptorSets(device, &allocate_info, nullptr);
+    VkResult result = vkAllocateDescriptorSets(device, &allocate_info, &descriptor_set);
     if (result != VK_SUCCESS) {
         VK_LOG_ERROR("Failed to allocate descriptor set!");
         throw std::runtime_error("Failed to allocate descriptor set!");

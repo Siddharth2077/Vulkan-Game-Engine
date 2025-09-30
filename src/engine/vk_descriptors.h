@@ -14,7 +14,6 @@ public:
 
 
 struct DescriptorSetAllocator {
-private:
     /// @brief Describe the @code ratio@endcode of each type of Descriptor to allocate from the Pool.
     /// @note Suppose @code max_descriptor_sets@endcode = 100, and @code ratio@endcode = 0.5 for a given @code descriptor_type@endcode, 50 such descriptors will be allocated in the Pool
     /// @attention This ratio is against the @code max_descriptor_sets@endcode value passed during @code init_descriptor_pool()@endcode
@@ -23,6 +22,7 @@ private:
         float ratio;
     };
 
+private:
     VkDescriptorPool descriptor_pool {VK_NULL_HANDLE};
 
 public:
