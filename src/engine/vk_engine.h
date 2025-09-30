@@ -8,8 +8,10 @@ constexpr unsigned int FRAME_OVERLAP {2};
 
 /// @brief This struct will help in scheduling the cleanup of objects in the right order.
 struct DeletionQueue {
+private:
 	std::deque<std::function<void()>> deleters;
 
+public:
 	/// Add a deleter function to the deleter de-que structure.
 	void push_deleter(std::function<void()>&& deleter) {
 		deleters.push_back(deleter);
