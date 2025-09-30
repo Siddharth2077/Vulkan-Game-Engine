@@ -176,11 +176,6 @@ void VulkanEngine::draw() {
     imageSubresourceRange.baseArrayLayer = 0;
     imageSubresourceRange.layerCount = 1;
 
-    // VkClearColorValue clearColorValue {};
-    // float flash = std::abs(std::sin(_frameNumber / 120.f));
-    // clearColorValue = { { 0.0f, 0.0f, flash, 1.0f } };
-    // vkCmdClearColorImage(commandBuffer, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearColorValue, 1, &imageSubresourceRange);
-
     // Bind the pipeline for drawing with compute
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipeline);
     // Bind the descriptor sets

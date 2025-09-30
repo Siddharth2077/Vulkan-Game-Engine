@@ -5,21 +5,85 @@
 layout (local_size_x = 16, local_size_y = 16) in;
 
 //descriptor bindings for the pipeline
-layout (rgba16f,set = 0, binding = 0) uniform image2D image;
+layout (rgba16f, set = 0, binding = 0) uniform image2D image;
 
+// Simple hash function for pseudo-random noise
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Fractal Brownian Motion for organic noise
+float fbm(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for(int i = 0; i < 5; i++) {
+        value += amplitude * (hash(p) * 2.0 - 1.0);
+        p *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
 
 void main() {
     ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(image);
 
     if (texelCoord.x < size.x && texelCoord.y < size.y) {
-        vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 uv = vec2(texelCoord) / vec2(size);
+        vec2 p = (uv * 2.0 - 1.0);
+        p.x *= float(size.x) / float(size.y);
 
-        if (gl_LocalInvocationID.x != 0 && gl_LocalInvocationID.y != 0) {
-            color.x = float(texelCoord.x)/(size.x);
-            color.y = float(texelCoord.y)/(size.y);
-        }
+        float time = 0.0; // Animate this for motion!
 
-        imageStore(image, texelCoord, color);
+        // Polar coordinates for tunnel effect
+        float radius = length(p);
+        float angle = atan(p.y, p.x);
+
+        // Create tunnel depth
+        float depth = 1.0 / (radius + 0.1);
+
+        // Spiral pattern
+        float spiral = sin(angle * 6.0 + depth * 4.0 + time) * 0.5 + 0.5;
+
+        // Layered rotating rings
+        float rings = sin(depth * 10.0 - time * 2.0) * 0.5 + 0.5;
+        rings *= sin(angle * 8.0 + time) * 0.5 + 0.5;
+
+        // Add fractal noise for organic feel
+        vec2 noiseCoord = vec2(angle * 3.0, depth * 2.0) + time * 0.1;
+        float noise = fbm(noiseCoord * 2.0) * 0.5 + 0.5;
+
+        // Combine patterns
+        float pattern = spiral * rings + noise * 0.3;
+
+        // Kaleidoscope effect
+        float symmetry = abs(sin(angle * 12.0)) * abs(cos(depth * 5.0));
+        pattern = mix(pattern, symmetry, 0.4);
+
+        // Vibrant color palette with multiple hues
+        vec3 color1 = vec3(0.9, 0.1, 0.6); // Magenta
+        vec3 color2 = vec3(0.1, 0.9, 0.9); // Cyan
+        vec3 color3 = vec3(0.9, 0.9, 0.1); // Yellow
+        vec3 color4 = vec3(0.2, 0.1, 0.9); // Deep blue
+
+        // Multi-stage color mixing
+        vec3 color = mix(color1, color2, sin(pattern * 6.28318) * 0.5 + 0.5);
+        color = mix(color, color3, cos(pattern * 12.56636 + rings * 3.14159) * 0.5 + 0.5);
+        color = mix(color, color4, spiral * noise);
+
+        // Add glow/bloom effect
+        float glow = pow(pattern, 3.0) * 2.0;
+        color += vec3(glow * 0.3);
+
+        // Vignette for depth
+        float vignette = smoothstep(1.5, 0.5, radius);
+        color *= vignette * 0.5 + 0.5;
+
+        // Boost saturation and brightness
+        color = pow(color, vec3(0.8)) * 1.3;
+
+        imageStore(image, texelCoord, vec4(color, 1.0));
     }
 }
