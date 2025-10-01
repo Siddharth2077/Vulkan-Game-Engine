@@ -5,8 +5,13 @@ project(VulkanEngine)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set macOS deployment target
-set(CMAKE_OSX_DEPLOYMENT_TARGET "15.5")
+# Windows-specific settings
+if(WIN32)
+    # Suppress min/max macros that conflict with std::min/std::max
+    add_definitions(-DNOMINMAX)
+    # Use Unicode character set
+    add_definitions(-DUNICODE -D_UNICODE)
+endif()
 
 # Find Vulkan
 find_package(Vulkan REQUIRED)
@@ -14,6 +19,7 @@ find_package(Vulkan REQUIRED)
 # Find glslc compiler
 find_program(GLSLC_EXECUTABLE glslc HINTS
         ${Vulkan_GLSLC_EXECUTABLE}
+        "$ENV{VULKAN_SDK}/Bin"
         REQUIRED
 )
 
@@ -22,7 +28,6 @@ if(NOT GLSLC_EXECUTABLE)
 else()
     message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
 endif()
-
 
 # Third-party directory
 set(THIRD_PARTY_DIR "${CMAKE_SOURCE_DIR}/third_party")
@@ -51,7 +56,9 @@ set(IMGUI_SOURCES
 # Add fmt library (needs compilation)
 add_subdirectory(${THIRD_PARTY_DIR}/fmt)
 
-# Add SDL3 library
+# Add SDL3 library with Windows-specific options
+set(SDL_STATIC ON CACHE BOOL "Build SDL3 as static library")
+set(SDL_SHARED OFF CACHE BOOL "Don't build SDL3 as shared library")
 add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
 
 # Add vk-bootstrap library
@@ -59,7 +66,6 @@ add_subdirectory(${THIRD_PARTY_DIR}/vk-bootstrap)
 
 # Add fastgltf library
 add_subdirectory(${THIRD_PARTY_DIR}/fastgltf)
-
 
 # Shader compilation setup
 set(SHADER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
@@ -106,10 +112,12 @@ endforeach()
 # Create a custom target for all shaders
 add_custom_target(compile_shaders ALL DEPENDS ${COMPILED_SHADERS})
 
-
 # Create executable
 file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.h")
 add_executable(VulkanEngine ${SOURCES} ${IMGUI_SOURCES})
+
+# Make VulkanEngine depend on shader compilation
+add_dependencies(VulkanEngine compile_shaders)
 
 # Include directories
 target_include_directories(VulkanEngine PRIVATE
@@ -122,13 +130,38 @@ target_include_directories(VulkanEngine PRIVATE
 )
 
 # Link libraries
-target_link_libraries(VulkanEngine
+target_link_libraries(VulkanEngine PRIVATE
         fmt::fmt
         SDL3::SDL3
         vk-bootstrap::vk-bootstrap
         fastgltf
         ${Vulkan_LIBRARIES}
 )
+
+# Windows-specific linker settings
+if(WIN32)
+    # Link against Windows libraries that Vulkan/SDL might need
+    target_link_libraries(VulkanEngine PRIVATE
+            winmm    # Windows Multimedia
+            imm32    # Input Method Manager
+            version  # Version info
+            setupapi # Setup API
+    )
+
+    # Set working directory for Visual Studio
+    set_target_properties(VulkanEngine PROPERTIES
+            VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+
+    # Copy SDL3 DLL to output directory if building shared (though we set static above)
+    if(TARGET SDL3::SDL3-shared)
+        add_custom_command(TARGET VulkanEngine POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:SDL3::SDL3-shared>
+                $<TARGET_FILE_DIR:VulkanEngine>
+        )
+    endif()
+endif()
 
 # Print shader info for debugging
 list(LENGTH SHADER_FILES SHADER_COUNT)
@@ -140,3 +173,8 @@ if(SHADER_COUNT GREATER 0)
 else()
     message(STATUS "No shader files found in ${SHADER_SOURCE_DIR}")
 endif()
+
+# Print build configuration
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "Vulkan SDK: ${Vulkan_INCLUDE_DIRS}")
