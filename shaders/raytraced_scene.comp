@@ -1,0 +1,352 @@
+//GLSL version to use
+#version 460
+
+//size of a workgroup for compute
+layout (local_size_x = 16, local_size_y = 16) in;
+
+//descriptor bindings for the pipeline
+layout (rgba16f, set = 0, binding = 0) uniform image2D image;
+
+// Ray structure
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Material types
+const int MATERIAL_DIFFUSE = 0;
+const int MATERIAL_GLASS = 1;
+const int MATERIAL_MIRROR = 2;
+
+// Sphere structure
+struct Sphere {
+    vec3 center;
+    float radius;
+    vec3 color;
+    int material;
+    float ior;
+};
+
+// Hit record
+struct HitRecord {
+    float t;
+    vec3 point;
+    vec3 normal;
+    int sphereIndex;
+};
+
+// Simple pseudo-random number generator
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Ray-sphere intersection
+float intersectSphere(Ray ray, Sphere sphere) {
+    vec3 oc = ray.origin - sphere.center;
+    float a = dot(ray.direction, ray.direction);
+    float b = 2.0 * dot(oc, ray.direction);
+    float c = dot(oc, oc) - sphere.radius * sphere.radius;
+    float discriminant = b * b - 4.0 * a * c;
+
+    if (discriminant < 0.0) {
+        return -1.0;
+    }
+
+    return (-b - sqrt(discriminant)) / (2.0 * a);
+}
+
+// Calculate surface normal at hit point
+vec3 getSphereNormal(vec3 hitPoint, Sphere sphere) {
+    return normalize(hitPoint - sphere.center);
+}
+
+// Schlick's approximation for Fresnel reflectance
+float schlick(float cosine, float ior) {
+    float r0 = (1.0 - ior) / (1.0 + ior);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+// Custom refract function
+vec3 refractCustom(vec3 incident, vec3 normal, float eta) {
+    float cosI = -dot(normal, incident);
+    float sinT2 = eta * eta * (1.0 - cosI * cosI);
+
+    if (sinT2 > 1.0) {
+        return vec3(0.0);
+    }
+
+    float cosT = sqrt(1.0 - sinT2);
+    return eta * incident + (eta * cosI - cosT) * normal;
+}
+
+// Simple lighting calculation
+vec3 calculateLighting(vec3 hitPoint, vec3 normal, vec3 lightPos, vec3 baseColor) {
+    vec3 lightDir = normalize(lightPos - hitPoint);
+    float diff = max(dot(normal, lightDir), 0.0);
+
+    // Add specular highlight
+    vec3 viewDir = normalize(-hitPoint);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
+
+    vec3 ambient = 0.2 * baseColor;
+    vec3 diffuse = diff * baseColor;
+    vec3 specular = spec * vec3(0.3);
+
+    return ambient + diffuse + specular;
+}
+
+// Trace ray through scene
+const int NUM_SPHERES = 22;
+
+bool traceRay(Ray ray, out HitRecord hit, Sphere spheres[NUM_SPHERES]) {
+    float closestT = 1000000.0;
+    int hitSphereIndex = -1;
+
+    for (int i = 0; i < NUM_SPHERES; i++) {
+        float t = intersectSphere(ray, spheres[i]);
+        if (t > 0.001 && t < closestT) {
+            closestT = t;
+            hitSphereIndex = i;
+        }
+    }
+
+    if (hitSphereIndex >= 0) {
+        hit.t = closestT;
+        hit.sphereIndex = hitSphereIndex;
+        hit.point = ray.origin + ray.direction * closestT;
+        hit.normal = getSphereNormal(hit.point, spheres[hitSphereIndex]);
+        return true;
+    }
+
+    return false;
+}
+
+// Trace a single ray and return color
+vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
+    vec3 finalColor = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+
+    const int MAX_BOUNCES = 6;
+
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+        HitRecord hit;
+
+        if (traceRay(ray, hit, spheres)) {
+            Sphere sphere = spheres[hit.sphereIndex];
+
+            if (sphere.material == MATERIAL_DIFFUSE) {
+                vec3 color = calculateLighting(hit.point, hit.normal, lightPos, sphere.color);
+
+                // Check shadow
+                Ray shadowRay;
+                shadowRay.origin = hit.point + hit.normal * 0.001;
+                shadowRay.direction = normalize(lightPos - hit.point);
+                HitRecord shadowHit;
+
+                if (traceRay(shadowRay, shadowHit, spheres)) {
+                    color *= 0.3;
+                }
+
+                finalColor += throughput * color;
+                break;
+
+            } else if (sphere.material == MATERIAL_MIRROR) {
+                vec3 reflected = reflect(ray.direction, hit.normal);
+                ray.origin = hit.point + hit.normal * 0.001;
+                ray.direction = reflected;
+                throughput *= sphere.color * 0.95;
+
+            } else if (sphere.material == MATERIAL_GLASS) {
+                vec3 outwardNormal;
+                float niOverNt;
+                float cosine;
+
+                if (dot(ray.direction, hit.normal) > 0.0) {
+                    outwardNormal = -hit.normal;
+                    niOverNt = sphere.ior;
+                    cosine = sphere.ior * dot(ray.direction, hit.normal);
+                } else {
+                    outwardNormal = hit.normal;
+                    niOverNt = 1.0 / sphere.ior;
+                    cosine = -dot(ray.direction, hit.normal);
+                }
+
+                vec3 refracted = refractCustom(ray.direction, outwardNormal, niOverNt);
+                float reflectProb = 1.0;
+
+                if (length(refracted) > 0.0) {
+                    reflectProb = schlick(cosine, sphere.ior);
+                }
+
+                if (bounce % 2 == 0 && reflectProb < 0.9) {
+                    ray.origin = hit.point - outwardNormal * 0.001;
+                    ray.direction = refracted;
+                } else {
+                    ray.origin = hit.point + outwardNormal * 0.001;
+                    ray.direction = reflect(ray.direction, hit.normal);
+                }
+
+                throughput *= sphere.color;
+            }
+
+        } else {
+            // Hit sky - colorful gradient
+            float t = 0.5 * (ray.direction.y + 1.0);
+            vec3 skyColor = mix(vec3(1.0, 0.8, 0.6), vec3(0.3, 0.5, 1.0), t);
+            finalColor += throughput * skyColor;
+            break;
+        }
+    }
+
+    return finalColor;
+}
+
+void main() {
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+
+    if (texelCoord.x < size.x && texelCoord.y < size.y) {
+        // Set up camera
+        vec3 cameraPos = vec3(0.0, 2.0, 10.0);
+        vec3 cameraTarget = vec3(0.0, 0.0, 0.0);
+        vec3 cameraUp = vec3(0.0, 1.0, 0.0);
+
+        vec3 forward = normalize(cameraTarget - cameraPos);
+        vec3 right = normalize(cross(forward, cameraUp));
+        vec3 up = cross(right, forward);
+
+        // Define colorful scene
+        Sphere spheres[NUM_SPHERES];
+
+        // Center glass sphere
+        spheres[0].center = vec3(0.0, 0.5, 0.0);
+        spheres[0].radius = 1.2;
+        spheres[0].color = vec3(0.95, 0.95, 1.0);
+        spheres[0].material = MATERIAL_GLASS;
+        spheres[0].ior = 1.5;
+
+        // Large mirror sphere behind
+        spheres[1].center = vec3(-3.0, 1.0, -2.0);
+        spheres[1].radius = 1.0;
+        spheres[1].color = vec3(1.0, 0.9, 0.8);
+        spheres[1].material = MATERIAL_MIRROR;
+        spheres[1].ior = 0.0;
+
+        // Colorful small spheres arranged in a circle
+        for (int i = 0; i < 12; i++) {
+            float angle = float(i) * 3.14159 * 2.0 / 12.0;
+            float radius = 4.5;
+
+            spheres[i + 2].center = vec3(cos(angle) * radius, 0.3, sin(angle) * radius);
+            spheres[i + 2].radius = 0.4;
+
+            // Rainbow colors
+            float hue = float(i) / 12.0;
+            vec3 color;
+            if (hue < 0.166) color = mix(vec3(1,0,0), vec3(1,1,0), hue * 6.0);
+            else if (hue < 0.333) color = mix(vec3(1,1,0), vec3(0,1,0), (hue - 0.166) * 6.0);
+            else if (hue < 0.5) color = mix(vec3(0,1,0), vec3(0,1,1), (hue - 0.333) * 6.0);
+            else if (hue < 0.666) color = mix(vec3(0,1,1), vec3(0,0,1), (hue - 0.5) * 6.0);
+            else if (hue < 0.833) color = mix(vec3(0,0,1), vec3(1,0,1), (hue - 0.666) * 6.0);
+            else color = mix(vec3(1,0,1), vec3(1,0,0), (hue - 0.833) * 6.0);
+
+            spheres[i + 2].color = color;
+            spheres[i + 2].material = MATERIAL_DIFFUSE;
+            spheres[i + 2].ior = 0.0;
+        }
+
+        // Small glass spheres floating
+        spheres[14].center = vec3(2.0, 2.5, 1.0);
+        spheres[14].radius = 0.5;
+        spheres[14].color = vec3(1.0, 0.8, 0.8);
+        spheres[14].material = MATERIAL_GLASS;
+        spheres[14].ior = 1.8;
+
+        spheres[15].center = vec3(-2.0, 2.8, 2.0);
+        spheres[15].radius = 0.4;
+        spheres[15].color = vec3(0.8, 1.0, 0.8);
+        spheres[15].material = MATERIAL_GLASS;
+        spheres[15].ior = 1.6;
+
+        // More colorful diffuse spheres
+        spheres[16].center = vec3(3.5, 0.6, 2.0);
+        spheres[16].radius = 0.6;
+        spheres[16].color = vec3(1.0, 0.3, 0.7);
+        spheres[16].material = MATERIAL_DIFFUSE;
+        spheres[16].ior = 0.0;
+
+        spheres[17].center = vec3(-3.5, 0.5, 3.0);
+        spheres[17].radius = 0.5;
+        spheres[17].color = vec3(0.3, 1.0, 0.7);
+        spheres[17].material = MATERIAL_DIFFUSE;
+        spheres[17].ior = 0.0;
+
+        spheres[18].center = vec3(1.5, 0.4, 4.0);
+        spheres[18].radius = 0.4;
+        spheres[18].color = vec3(1.0, 0.7, 0.2);
+        spheres[18].material = MATERIAL_DIFFUSE;
+        spheres[18].ior = 0.0;
+
+        // Mirror sphere on the right
+        spheres[19].center = vec3(4.0, 1.2, -1.0);
+        spheres[19].radius = 0.8;
+        spheres[19].color = vec3(0.9, 0.9, 1.0);
+        spheres[19].material = MATERIAL_MIRROR;
+        spheres[19].ior = 0.0;
+
+        // Small colored glass sphere
+        spheres[20].center = vec3(-1.5, 1.5, 3.0);
+        spheres[20].radius = 0.5;
+        spheres[20].color = vec3(0.9, 0.8, 1.0);
+        spheres[20].material = MATERIAL_GLASS;
+        spheres[20].ior = 1.7;
+
+        // Ground plane
+        spheres[21].center = vec3(0.0, -100.5, 0.0);
+        spheres[21].radius = 100.0;
+        spheres[21].color = vec3(0.6, 0.6, 0.7);
+        spheres[21].material = MATERIAL_DIFFUSE;
+        spheres[21].ior = 0.0;
+
+        // Light position
+        vec3 lightPos = vec3(5.0, 8.0, 6.0);
+
+        // Anti-aliasing with 4 samples per pixel
+        vec3 accumulatedColor = vec3(0.0);
+        const int AA_SAMPLES = 4;
+
+        for (int sampleIdx = 0; sampleIdx < AA_SAMPLES; sampleIdx++) {
+            // Jitter offset for anti-aliasing
+            vec2 jitter = vec2(
+            hash(vec2(texelCoord) + float(sampleIdx) * 0.1) - 0.5,
+            hash(vec2(texelCoord) + float(sampleIdx) * 0.2) - 0.5
+            ) / vec2(size);
+
+            vec2 uv = (vec2(texelCoord) + vec2(0.5)) / vec2(size);
+            uv += jitter;
+            vec2 ndc = (uv * 2.0 - 1.0);
+            ndc.y = -ndc.y;
+            ndc.x *= float(size.x) / float(size.y);
+
+            // Create ray
+            Ray ray;
+            ray.origin = cameraPos;
+            ray.direction = normalize(forward + ndc.x * right + ndc.y * up);
+
+            accumulatedColor += traceColoredRay(ray, spheres, lightPos);
+        }
+
+        // Average the samples
+        vec3 finalColor = accumulatedColor / float(AA_SAMPLES);
+
+        // Tone mapping for better color
+        finalColor = finalColor / (finalColor + vec3(1.0));
+        finalColor = pow(finalColor, vec3(1.0 / 2.2)); // Gamma correction
+
+        imageStore(image, texelCoord, vec4(finalColor, 1.0));
+    }
+}

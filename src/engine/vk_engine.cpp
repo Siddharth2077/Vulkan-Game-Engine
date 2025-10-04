@@ -821,12 +821,12 @@ void VulkanEngine::init_background_img_pipeline() {
     // Create the Compute-Pipeline
     // Load the SpirV compiled compute-shader
     VkShaderModule computeDrawShaderModule;
-    if (!vkutil::load_shader_module(_device, &computeDrawShaderModule, "./shaders/gradient.comp.spv")) {
-        VK_LOG_ERROR("Failed to load SpirV shader: gradient.comp.spv");
-        throw std::runtime_error("Failed to load SpirV shader: gradient.comp.spv");
+    if (!vkutil::load_shader_module(_device, &computeDrawShaderModule, "./shaders/fractal.comp.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: fractal.comp.spv");
+        throw std::runtime_error("Failed to load SpirV shader: fractal.comp.spv");
     }
-    VK_LOG_INFO("Loaded SpirV shader: gradient.comp.spv");
-    VK_LOG_INFO("Created compute shader-module from shader: gradient.comp.spv");
+    VK_LOG_INFO("Loaded SpirV shader: fractal.comp.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: fractal.comp.spv");
 
     VkPipelineShaderStageCreateInfo pipelineShaderStageInfo{};
     pipelineShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
