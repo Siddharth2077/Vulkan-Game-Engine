@@ -182,18 +182,23 @@ void VulkanEngine::draw() {
     imageSubresourceRange.baseArrayLayer = 0;
     imageSubresourceRange.layerCount = 1;
 
-    // Bind the pipeline for drawing with compute
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipeline);
+    // Bind the pipeline for drawing with compute (Use the currently selected one in the UI)
+    ComputeShaderEffects& currentShaderEffect = _computeShaderBackgroundEffects.at(_currentComputeShaderBackgroundEffect);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentShaderEffect.pipeline);
     // Bind the descriptor sets
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipelineLayout, 0, 1, &_drawImageDescriptorSet, 0, nullptr);
 
     // Set the values of the Push-Constants for the shaders
-    ComputeShaderPushConstants compute_push_constants{};
     float time_elapsed = (SDL_GetTicks() / 1000.f);
     float speed_multiplier = 1.0f;
-    compute_push_constants.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
-    compute_push_constants.data_2 = glm::vec4(1, 0, 0, 0);
-    vkCmdPushConstants(commandBuffer, _backgroundImgPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputeShaderPushConstants), &compute_push_constants);
+    if (_currentComputeShaderBackgroundEffect == 0)
+        currentShaderEffect.push_constants_data.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
+    else
+    currentShaderEffect.push_constants_data.data_1 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_2 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_3 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_4 = glm::vec4(0, 0, 0, 0);
+    vkCmdPushConstants(commandBuffer, _backgroundImgPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputeShaderPushConstants), &currentShaderEffect.push_constants_data);
 
     // Execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it to get total group-counts needed along X and Y
     vkCmdDispatch(commandBuffer, std::ceil(_drawImageExtent.width / 16.0), std::ceil(_drawImageExtent.height / 16.0), 1);
@@ -404,8 +409,21 @@ void VulkanEngine::run() {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
-        // Show the ImGui demo UI
-        ImGui::ShowDemoWindow();
+
+        if (ImGui::Begin("Switch Compute-Shader")) {
+            ComputeShaderEffects& selected = _computeShaderBackgroundEffects[_currentComputeShaderBackgroundEffect];
+
+            ImGui::Text("Selected effect: %s", selected.name);
+
+            ImGui::SliderInt("Effect Index", &_currentComputeShaderBackgroundEffect, 0, _computeShaderBackgroundEffects.size() - 1);
+
+            ImGui::InputFloat4("data-1",reinterpret_cast<float *>(&selected.push_constants_data.data_1));
+            ImGui::InputFloat4("data-2",reinterpret_cast<float *>(&selected.push_constants_data.data_2));
+            ImGui::InputFloat4("data-3",reinterpret_cast<float *>(&selected.push_constants_data.data_3));
+            ImGui::InputFloat4("data-4",reinterpret_cast<float *>(&selected.push_constants_data.data_4));
+        }
+        ImGui::End();
+
         // ImGui's Render() method will only calculate the vertices/draws etc. needed by it to draw its frame
         // But it doesn't do any drawing of its own. We will need to handle that in our Engine's draw function.
         ImGui::Render();
@@ -836,42 +854,89 @@ void VulkanEngine::init_background_img_pipeline() {
     }
     VK_LOG_SUCCESS("Created pipeline-layout for background-img draw");
 
-    // Create the Compute-Pipeline
-    // Load the SpirV compiled compute-shader
-    VkShaderModule computeDrawShaderModule;
-    if (!vkutil::load_shader_module(_device, &computeDrawShaderModule, "./shaders/fractal.comp.spv")) {
+    // Create the Compute-Pipelines
+    // Load the SpirV compiled compute-shaders
+    VkShaderModule fractalShaderModule;
+    if (!vkutil::load_shader_module(_device, &fractalShaderModule, "./shaders/fractal.comp.spv")) {
         VK_LOG_ERROR("Failed to load SpirV shader: fractal.comp.spv");
         throw std::runtime_error("Failed to load SpirV shader: fractal.comp.spv");
     }
     VK_LOG_INFO("Loaded SpirV shader: fractal.comp.spv");
     VK_LOG_INFO("Created compute shader-module from shader: fractal.comp.spv");
 
-    VkPipelineShaderStageCreateInfo pipelineShaderStageInfo{};
-    pipelineShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipelineShaderStageInfo.pNext = nullptr;
-    pipelineShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipelineShaderStageInfo.module = computeDrawShaderModule;
-    pipelineShaderStageInfo.pName = "main";
-
-    VkComputePipelineCreateInfo computePipelineCreateInfo{};
-    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    computePipelineCreateInfo.pNext = nullptr;
-    computePipelineCreateInfo.layout = _backgroundImgPipelineLayout;
-    computePipelineCreateInfo.stage = pipelineShaderStageInfo;
-
-    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &_backgroundImgPipeline);
-    if (result != VK_SUCCESS) {
-        VK_LOG_ERROR("Failed to create compute pipeline");
-        throw std::runtime_error("Failed to create compute pipeline");
+    VkShaderModule rayTracedShaderModule;
+    if (!vkutil::load_shader_module(_device, &rayTracedShaderModule, "./shaders/raytraced_scene.comp.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: raytraced_scene.comp.spv");
+        throw std::runtime_error("Failed to load SpirV shader: raytraced_scene.comp.spv");
     }
-    VK_LOG_SUCCESS("Created compute pipeline");
+    VK_LOG_INFO("Loaded SpirV shader: raytraced_scene.comp.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: raytraced_scene.comp.spv");
+
+    // Create the compute pipeline for the fractal-shader:
+    VkPipelineShaderStageCreateInfo fractalStageInfo{};
+    fractalStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fractalStageInfo.pNext = nullptr;
+    fractalStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    fractalStageInfo.module = fractalShaderModule;
+    fractalStageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo fractalPipelineCreateInfo{};
+    fractalPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    fractalPipelineCreateInfo.pNext = nullptr;
+    fractalPipelineCreateInfo.layout = _backgroundImgPipelineLayout;
+    fractalPipelineCreateInfo.stage = fractalStageInfo;
+
+    ComputeShaderEffects fractalShaderEffect {};
+    fractalShaderEffect.name = "Fractal Tunnel";
+    fractalShaderEffect.pipeline_layout = _backgroundImgPipelineLayout;
+    fractalShaderEffect.push_constants_data = {};
+
+    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &fractalPipelineCreateInfo, nullptr, &fractalShaderEffect.pipeline);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create compute pipeline for fractal-shader");
+        throw std::runtime_error("Failed to create compute pipeline for fractal-shader");
+    }
+    VK_LOG_SUCCESS("Created compute pipeline for fractal-shader");
+
+    // Create the compute pipeline for the raytraced-scene shader:
+    VkPipelineShaderStageCreateInfo raytracedStageInfo{};
+    raytracedStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    raytracedStageInfo.pNext = nullptr;
+    raytracedStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    raytracedStageInfo.module = rayTracedShaderModule;
+    raytracedStageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo raytracedPipelineCreateInfo{};
+    raytracedPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    raytracedPipelineCreateInfo.pNext = nullptr;
+    raytracedPipelineCreateInfo.layout = _backgroundImgPipelineLayout;
+    raytracedPipelineCreateInfo.stage = raytracedStageInfo;
+
+    ComputeShaderEffects rayTracedSceneEffect {};
+    rayTracedSceneEffect.name = "Ray-Traced Scene";
+    rayTracedSceneEffect.pipeline_layout = _backgroundImgPipelineLayout;
+    rayTracedSceneEffect.push_constants_data = {};
+
+    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &raytracedPipelineCreateInfo, nullptr, &rayTracedSceneEffect.pipeline);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create compute pipeline for raytraced-scene-shader");
+        throw std::runtime_error("Failed to create compute pipeline for raytraced-scene-shader");
+    }
+    VK_LOG_SUCCESS("Created compute pipeline for raytraced-scene-shader");
+
+
+    // Add the 2 compute-shader background effects to the array of effects:
+    _computeShaderBackgroundEffects.push_back(fractalShaderEffect);
+    _computeShaderBackgroundEffects.push_back(rayTracedSceneEffect);
 
 
     // Schedule cleanup
-    vkDestroyShaderModule(_device, computeDrawShaderModule, nullptr);  // We no longer need it after creating the pipeline
-    _mainDeletionQueue.push_deleter([&]() {
+    vkDestroyShaderModule(_device, fractalShaderModule, nullptr);   // We no longer need it after creating the pipeline
+    vkDestroyShaderModule(_device, rayTracedShaderModule, nullptr); // We no longer need it after creating the pipeline
+    _mainDeletionQueue.push_deleter([=, this]() {
         vkDestroyPipelineLayout(_device, _backgroundImgPipelineLayout, nullptr);
-        vkDestroyPipeline(_device, _backgroundImgPipeline, nullptr);
+        vkDestroyPipeline(_device, rayTracedSceneEffect.pipeline, nullptr);
+        vkDestroyPipeline(_device, fractalShaderEffect.pipeline, nullptr);
     });
 }
 

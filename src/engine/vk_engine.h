@@ -52,6 +52,15 @@ struct ComputeShaderPushConstants {
 	glm::vec4 data_4;
 };
 
+/// We will have an array of this struct to switch between the compute shader pipelines, in the UI at runtime
+struct ComputeShaderEffects {
+	const char* name;
+	VkPipeline pipeline;
+	VkPipelineLayout pipeline_layout;
+
+	ComputeShaderPushConstants push_constants_data;
+};
+
 
 /// The main Vulkan Engine class.
 ///
@@ -129,6 +138,10 @@ private:
 	VkFence _immediateFence{ nullptr };
 	VkCommandPool _immediateCommandPool{ nullptr };
 	VkCommandBuffer _immediateCommandBuffer{ nullptr };
+
+	// Array containing the compute-shader effects for switching in the UI at runtime
+	std::vector<ComputeShaderEffects> _computeShaderBackgroundEffects {};
+	int _currentComputeShaderBackgroundEffect {0};
 
 
 	// Initialization helper methods
