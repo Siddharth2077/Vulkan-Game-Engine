@@ -8,13 +8,17 @@
 #include <chrono>
 #include <thread>
 #include <VkBootstrap.h>
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_vulkan.h"
 
 #include "vk_images.h"
 #include "vk_logger.h"
 #include "vk_pipelines.h"
 
 constexpr bool bUseValidationLayers {true};
-constexpr uint64_t ENGINE_TIMEOUT_1_SECOND {1000000000};
+constexpr uint64_t ENGINE_TIMEOUT_1_SECOND      {1000000000};   // in nanoseconds
+constexpr uint64_t ENGINE_TIMEOUT_10_SECONDS    {10000000000};  // in nanoseconds
 
 // Global pointer to the Singleton Instance of the engine.
 VulkanEngine* loadedEngine = nullptr;
@@ -55,6 +59,7 @@ void VulkanEngine::init() {
     init_sync_structures();
     init_descriptors();
     init_pipelines();
+    init_imgui();
 
     // Everything went fine
     _isInitialized = true;
@@ -140,6 +145,7 @@ void VulkanEngine::draw() {
     // Begin the command buffer recording
     VkCommandBufferBeginInfo commandBufferBeginInfo {};
     commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    commandBufferBeginInfo.pNext = nullptr;
     commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     result = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
     if (result != VK_SUCCESS) {
@@ -217,6 +223,9 @@ void VulkanEngine::draw() {
         _drawImageExtent,
         _swapchainExtent
     );
+
+    // Draw the ImGui UI onto the current swapchain-image
+    draw_imgui(commandBuffer, _swapchainImageViews.at(swapchainImageIndex));
 
     // OPTIMIZED: Transition swapchain image for presentation
     // From transfer destination (after blit) to present source
@@ -313,6 +322,32 @@ void VulkanEngine::draw() {
     vkQueueWaitIdle(_graphicsQueue);
 }
 
+void VulkanEngine::draw_imgui(VkCommandBuffer commandBuffer, VkImageView targetImageView) {
+    VkRenderingAttachmentInfo colorAttachment {};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.pNext = nullptr;
+    colorAttachment.imageView = targetImageView;
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo {};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.pNext = nullptr;
+    renderingInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, _swapchainExtent };
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
+    renderingInfo.pDepthAttachment = nullptr;
+    renderingInfo.pStencilAttachment = nullptr;
+
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+
+    vkCmdEndRendering(commandBuffer);
+}
+
 void VulkanEngine::run() {
     SDL_Event e;
     bool bQuit = false;
@@ -343,6 +378,9 @@ void VulkanEngine::run() {
                     default: break;
                 }
             }
+
+            // Pass the ImGui events to SDL-Event Handler
+            ImGui_ImplSDL2_ProcessEvent(&e);
         }
 
         // do not draw if we are minimized
@@ -352,8 +390,90 @@ void VulkanEngine::run() {
             continue;
         }
 
+        // ImGui new frame
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+        // Show the ImGui demo UI
+        ImGui::ShowDemoWindow();
+        // ImGui's Render() method will only calculate the vertices/draws etc. needed by it to draw its frame
+        // But it doesn't do any drawing of its own. We will need to handle that in our Engine's draw function.
+        ImGui::Render();
+
+
+        // The Engine's draw function
         draw();
     }
+}
+
+void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer)> &&function) {
+    // Reset the fence and the command-buffer used for immediate submit calls
+    VkResult result = vkResetFences(_device, 1, &_immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to reset the immediate-fence inside immediate_submit() call");
+        throw std::runtime_error("Failed to reset the immediate-fence inside immediate_submit() call");
+    }
+    result = vkResetCommandBuffer(_immediateCommandBuffer, 0);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to reset immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to reset immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Begin the command-buffer for recording commands
+    VkCommandBufferBeginInfo immediateCommandBufferBeginInfo{};
+    immediateCommandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    immediateCommandBufferBeginInfo.pNext = nullptr;
+    immediateCommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(_immediateCommandBuffer, &immediateCommandBufferBeginInfo);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to begin immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to begin immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Call the function passed as parameter:
+    function(_immediateCommandBuffer);
+
+    // End recording the command-buffer
+    result = vkEndCommandBuffer(_immediateCommandBuffer);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to end immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to end immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Submit the command buffer to the GPU and execute it
+    VkCommandBufferSubmitInfo immediateCommandBufferSubmitInfo {};
+    immediateCommandBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    immediateCommandBufferSubmitInfo.pNext = nullptr;
+    immediateCommandBufferSubmitInfo.commandBuffer = _immediateCommandBuffer;
+    immediateCommandBufferSubmitInfo.deviceMask = 0;
+
+    VkSubmitInfo2 cmdBufferSubmitInfo {};
+    cmdBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    cmdBufferSubmitInfo.pNext = nullptr;
+    cmdBufferSubmitInfo.commandBufferInfoCount = 1;
+    cmdBufferSubmitInfo.pCommandBufferInfos = &immediateCommandBufferSubmitInfo;
+    cmdBufferSubmitInfo.signalSemaphoreInfoCount = 0;
+    cmdBufferSubmitInfo.pSignalSemaphoreInfos = nullptr;
+    cmdBufferSubmitInfo.waitSemaphoreInfoCount = 0;
+    cmdBufferSubmitInfo.pWaitSemaphoreInfos = nullptr;
+
+    // Submit to the graphics queue.
+    // The _immediateFence will be blocked until the work is completed by the GPU
+    result = vkQueueSubmit2(_graphicsQueue, 1, &cmdBufferSubmitInfo, _immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to submit immediate command-buffer to the queue, inside immediate_submit() call");
+        throw std::runtime_error("Failed to submit immediate command-buffer to the queue, inside immediate_submit() call");
+    }
+    VK_LOG_INFO("Submitted immediate command-buffer to the queue");
+
+    // Wait for the immediate-fence (signals work completion of the immediate commands)
+    result = vkWaitForFences(_device, 1, &_immediateFence, true, ENGINE_TIMEOUT_10_SECONDS);
+    if (result != VK_SUCCESS) {
+        if (result == VK_TIMEOUT) {
+            VK_LOG_WARN("Timeout in waiting for _immediateFence inside immediate_submit() call");
+        }
+    }
+
 }
 
 
@@ -533,13 +653,42 @@ void VulkanEngine::init_commands() {
         }
     }
 
+
+    // Create the immediate command-pool and command-buffer
+    VkResult result = vkCreateCommandPool(_device, &command_pool_create_info, nullptr, &_immediateCommandPool);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate command-pool");
+        throw std::runtime_error("Failed to create immediate command-pool");
+    }
+    VK_LOG_SUCCESS("Created immediate command-pool");
+
+    VkCommandBufferAllocateInfo immediate_command_buffer_allocate_info{};
+    immediate_command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    immediate_command_buffer_allocate_info.pNext = nullptr;
+    immediate_command_buffer_allocate_info.commandPool = _immediateCommandPool;
+    immediate_command_buffer_allocate_info.commandBufferCount = 1;
+    immediate_command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    result = vkAllocateCommandBuffers(_device, &immediate_command_buffer_allocate_info, &_immediateCommandBuffer);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate command-buffer");
+        throw std::runtime_error("Failed to create immediate command-buffer");
+    }
+    VK_LOG_SUCCESS("Created immediate command-buffer");
+
+    // Queue the deletion of the immediate command-pool along with its allocated command-buffers
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyCommandPool(_device, _immediateCommandPool, nullptr);
+    });
+
 }
 
 void VulkanEngine::init_sync_structures() {
+    // Initialize the synchronization structures for the draw-loop:
     for (int i{0}; i < FRAME_OVERLAP; i++) {
         // We want the Fence to start in the signalled state, so we can wait on it on the first frame.
         VkFenceCreateInfo renderFenceCreateInfo{};
         renderFenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        renderFenceCreateInfo.pNext = nullptr;
         renderFenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
         VkSemaphoreCreateInfo semaphoreCreateInfo{};
@@ -565,6 +714,20 @@ void VulkanEngine::init_sync_structures() {
             throw std::runtime_error("Failed to create render finished semaphore");
         }
     }
+    VK_LOG_SUCCESS("Created sync structures for render-loop");
+
+    // Initialize the synchronization structures for the immediate-commands:
+    VkFenceCreateInfo immediateFenceCreateInfo {};
+    immediateFenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    immediateFenceCreateInfo.pNext = nullptr;
+    immediateFenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    VkResult result = vkCreateFence(_device, &immediateFenceCreateInfo, nullptr, &_immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate-fence");
+        throw std::runtime_error("Failed to create immediate-fence");
+    }
+    VK_LOG_SUCCESS("Created immediate-submit fence");
+
 }
 
 void VulkanEngine::init_pipelines() {
@@ -686,6 +849,73 @@ void VulkanEngine::init_background_img_pipeline() {
     _mainDeletionQueue.push_deleter([&]() {
         vkDestroyPipelineLayout(_device, _backgroundImgPipelineLayout, nullptr);
         vkDestroyPipeline(_device, _backgroundImgPipeline, nullptr);
+    });
+}
+
+void VulkanEngine::init_imgui() {
+    // 1. Create the Descriptor-Pool for ImGui
+    // The descriptor pool is very oversized, but its as per the ImGui-demo
+    const VkDescriptorPoolSize imgui_descriptor_pool_sizes[] = {
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+    };
+
+    VkDescriptorPoolCreateInfo imgui_descriptor_pool_create_info = {};
+    imgui_descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    imgui_descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    imgui_descriptor_pool_create_info.maxSets = 1000;
+    imgui_descriptor_pool_create_info.poolSizeCount = static_cast<uint32_t>(std::size(imgui_descriptor_pool_sizes));
+    imgui_descriptor_pool_create_info.pPoolSizes = imgui_descriptor_pool_sizes;
+
+    VkDescriptorPool imguiDescriptorPool {VK_NULL_HANDLE};
+    VkResult result = vkCreateDescriptorPool(_device, &imgui_descriptor_pool_create_info, nullptr, &imguiDescriptorPool);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create descriptor-pool for ImGUI");
+        throw std::runtime_error("Failed to create descriptor-pool for ImGUI");
+    }
+    VK_LOG_SUCCESS("Created descriptor-pool for ImGUI");
+
+
+    // 2. Initialize the ImGui library:
+
+    // Initializes the core structures of ImGui
+    ImGui::CreateContext();
+
+    // Initialize ImGui for SDL2
+    ImGui_ImplSDL2_InitForVulkan(_window);
+
+    // Initialize ImGui for Vulkan
+    ImGui_ImplVulkan_InitInfo imgui_impl_vulkan_init_info {};
+    imgui_impl_vulkan_init_info.Instance = _vulkanInstance;
+    imgui_impl_vulkan_init_info.PhysicalDevice = _physicalDevice;
+    imgui_impl_vulkan_init_info.Device = _device;
+    imgui_impl_vulkan_init_info.Queue = _graphicsQueue;
+    imgui_impl_vulkan_init_info.DescriptorPool = imguiDescriptorPool;
+    imgui_impl_vulkan_init_info.MinImageCount = 3;
+    imgui_impl_vulkan_init_info.ImageCount = 3;
+    imgui_impl_vulkan_init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;  // No MSAA
+    // Dynamic rendering parameters for ImGui to use:
+    imgui_impl_vulkan_init_info.UseDynamicRendering = true;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+
+    ImGui_ImplVulkan_Init(&imgui_impl_vulkan_init_info);
+
+
+    // Queue for deletion
+    _mainDeletionQueue.push_deleter([&]() {
+        ImGui_ImplVulkan_Shutdown();
+        vkDestroyDescriptorPool(_device, imguiDescriptorPool, nullptr);
     });
 }
 

@@ -58,12 +58,17 @@ public:
 
 	// Draw loop
 	void draw();
+	// For rendering ImGui UI using dynamic rendering
+	void draw_imgui(VkCommandBuffer commandBuffer, VkImageView targetImageView);
 
 	// Run main loop
 	void run();
 
 	/// Getter for fetching the FrameData struct for the current frame.
 	inline FrameData& get_current_frame() { return _frames.at(_frameNumber % FRAME_OVERLAP); }
+
+	/// Function for immediate submit actions
+	void immediate_submit(std::function<void(VkCommandBuffer)>&& function);
 
 private:
 	bool _isInitialized{ false };
@@ -112,6 +117,11 @@ private:
 	VkPipeline _backgroundImgPipeline;
 	VkPipelineLayout _backgroundImgPipelineLayout;
 
+	// Immediate Submit Structures
+	VkFence _immediateFence{ nullptr };
+	VkCommandPool _immediateCommandPool{ nullptr };
+	VkCommandBuffer _immediateCommandBuffer{ nullptr };
+
 
 	// Initialization helper methods
 	void init_vulkan();
@@ -123,6 +133,7 @@ private:
 	void init_vulkan_memory_allocator();
 	void init_descriptors();
 	void init_background_img_pipeline();
+	void init_imgui();
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();
