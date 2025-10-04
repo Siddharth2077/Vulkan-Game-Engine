@@ -9,7 +9,7 @@
 #include <thread>
 #include <VkBootstrap.h>
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
+#include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 
 #include "vk_images.h"
@@ -215,6 +215,7 @@ void VulkanEngine::draw() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT              // Blit will write to image
     );
 
+
     // Blit-copy from the draw-image to the swapchain-image to prepare it for presentation:
     vkutil::blit_image_to_image(
         commandBuffer,
@@ -380,7 +381,7 @@ void VulkanEngine::run() {
             }
 
             // Pass the ImGui events to SDL-Event Handler
-            ImGui_ImplSDL2_ProcessEvent(&e);
+            ImGui_ImplSDL3_ProcessEvent(&e);
         }
 
         // do not draw if we are minimized
@@ -392,7 +393,7 @@ void VulkanEngine::run() {
 
         // ImGui new frame
         ImGui_ImplVulkan_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         // Show the ImGui demo UI
         ImGui::ShowDemoWindow();
@@ -728,6 +729,10 @@ void VulkanEngine::init_sync_structures() {
     }
     VK_LOG_SUCCESS("Created immediate-submit fence");
 
+    // Queue the deletion of the immediate-fence
+    _mainDeletionQueue.push_deleter([this]() {
+       vkDestroyFence(_device, _immediateFence, nullptr);
+    });
 }
 
 void VulkanEngine::init_pipelines() {
@@ -890,8 +895,8 @@ void VulkanEngine::init_imgui() {
     // Initializes the core structures of ImGui
     ImGui::CreateContext();
 
-    // Initialize ImGui for SDL2
-    ImGui_ImplSDL2_InitForVulkan(_window);
+    // Initialize ImGui for SDL3
+    ImGui_ImplSDL3_InitForVulkan(_window);
 
     // Initialize ImGui for Vulkan
     ImGui_ImplVulkan_InitInfo imgui_impl_vulkan_init_info {};
@@ -910,10 +915,10 @@ void VulkanEngine::init_imgui() {
     imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
 
     ImGui_ImplVulkan_Init(&imgui_impl_vulkan_init_info);
-
+    VK_LOG_SUCCESS("Initialized ImGui");
 
     // Queue for deletion
-    _mainDeletionQueue.push_deleter([&]() {
+    _mainDeletionQueue.push_deleter([this, imguiDescriptorPool]() {
         ImGui_ImplVulkan_Shutdown();
         vkDestroyDescriptorPool(_device, imguiDescriptorPool, nullptr);
     });
