@@ -52,10 +52,6 @@ float hash(vec2 p) {
     return fract(p.x * p.y);
 }
 
-float hash3D(vec3 p) {
-    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
-}
-
 // Ray-sphere intersection
 float intersectSphere(Ray ray, Sphere sphere) {
     vec3 oc = ray.origin - sphere.center;
@@ -175,7 +171,7 @@ bool traceRay(Ray ray, out HitRecord hit, Sphere spheres[NUM_SPHERES]) {
     return false;
 }
 
-// Trace with reduced bounces
+// Trace with deterministic glass behavior
 vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
     vec3 finalColor = vec3(0.0);
     vec3 throughput = vec3(1.0);
@@ -230,21 +226,20 @@ vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
                 }
 
                 vec3 refracted = refractCustom(ray.direction, outwardNormal, niOverNt);
-                float reflectProb = 1.0;
 
+                // Deterministic refraction - no random sampling
                 if (length(refracted) > 0.0) {
-                    reflectProb = schlick(cosine, sphere.ior);
-                }
-
-                if (hash3D(hit.point + vec3(bounce)) > reflectProb) {
+                    // Use refraction, attenuated by inverse Fresnel
+                    float reflectProb = schlick(cosine, sphere.ior);
                     ray.origin = hit.point - outwardNormal * 0.001;
                     ray.direction = refracted;
+                    throughput *= sphere.color * (1.0 - reflectProb * 0.3);
                 } else {
+                    // Total internal reflection
                     ray.origin = hit.point + outwardNormal * 0.001;
                     ray.direction = reflect(ray.direction, hit.normal);
+                    throughput *= sphere.color;
                 }
-
-                throughput *= sphere.color;
             }
 
         } else {
@@ -396,7 +391,7 @@ void main() {
 
         // Reduced AA samples
         vec3 accumulatedColor = vec3(0.0);
-        const int AA_SAMPLES = 8;
+        const int AA_SAMPLES = 32;
 
         for (int sampleIdx = 0; sampleIdx < AA_SAMPLES; sampleIdx++) {
             vec2 jitter = vec2(

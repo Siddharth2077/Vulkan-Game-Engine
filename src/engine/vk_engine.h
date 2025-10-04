@@ -90,7 +90,7 @@ public:
 private:
 	bool _isInitialized{ false };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 1280 , 720 };
+	VkExtent2D _windowExtent{ 1440 , 810 };
 	int _frameNumber {0};
 	std::array<FrameData, FRAME_OVERLAP> _frames{};
 
