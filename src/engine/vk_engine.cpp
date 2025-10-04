@@ -191,10 +191,7 @@ void VulkanEngine::draw() {
     // Set the values of the Push-Constants for the shaders
     float time_elapsed = (SDL_GetTicks() / 1000.f);
     float speed_multiplier = 1.0f;
-    if (_currentComputeShaderBackgroundEffect == 0)
-        currentShaderEffect.push_constants_data.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
-    else
-    currentShaderEffect.push_constants_data.data_1 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
     currentShaderEffect.push_constants_data.data_2 = glm::vec4(0, 0, 0, 0);
     currentShaderEffect.push_constants_data.data_3 = glm::vec4(0, 0, 0, 0);
     currentShaderEffect.push_constants_data.data_4 = glm::vec4(0, 0, 0, 0);

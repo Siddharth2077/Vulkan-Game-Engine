@@ -25,6 +25,8 @@ struct Ray {
 const int MATERIAL_DIFFUSE = 0;
 const int MATERIAL_GLASS = 1;
 const int MATERIAL_MIRROR = 2;
+const int MATERIAL_EMISSIVE = 3;
+const int MATERIAL_CHECKERED = 4;
 
 // Sphere structure
 struct Sphere {
@@ -48,6 +50,10 @@ float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
+}
+
+float hash3D(vec3 p) {
+    return fract(sin(dot(p, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
 }
 
 // Ray-sphere intersection
@@ -90,25 +96,61 @@ vec3 refractCustom(vec3 incident, vec3 normal, float eta) {
     return eta * incident + (eta * cosI - cosT) * normal;
 }
 
-// Simple lighting calculation
-vec3 calculateLighting(vec3 hitPoint, vec3 normal, vec3 lightPos, vec3 baseColor) {
+// Colorful checkered pattern
+vec3 getCheckeredColor(vec3 point) {
+    float scale = 2.0;
+    float pattern = mod(floor(point.x * scale) + floor(point.z * scale), 2.0);
+
+    // Rainbow colors based on position
+    float hue = fract((point.x + point.z) * 0.1);
+    vec3 color1, color2;
+
+    if (hue < 0.166) {
+        color1 = mix(vec3(1,0,0), vec3(1,0.5,0), hue * 6.0);
+        color2 = mix(vec3(1,0.5,0), vec3(1,1,0), hue * 6.0);
+    } else if (hue < 0.333) {
+        color1 = mix(vec3(1,1,0), vec3(0,1,0), (hue - 0.166) * 6.0);
+        color2 = mix(vec3(0,1,0), vec3(0,1,0.5), (hue - 0.166) * 6.0);
+    } else if (hue < 0.5) {
+        color1 = mix(vec3(0,1,0.5), vec3(0,1,1), (hue - 0.333) * 6.0);
+        color2 = mix(vec3(0,1,1), vec3(0,0.5,1), (hue - 0.333) * 6.0);
+    } else if (hue < 0.666) {
+        color1 = mix(vec3(0,0.5,1), vec3(0,0,1), (hue - 0.5) * 6.0);
+        color2 = mix(vec3(0,0,1), vec3(0.5,0,1), (hue - 0.5) * 6.0);
+    } else if (hue < 0.833) {
+        color1 = mix(vec3(0.5,0,1), vec3(1,0,1), (hue - 0.666) * 6.0);
+        color2 = mix(vec3(1,0,1), vec3(1,0,0.5), (hue - 0.666) * 6.0);
+    } else {
+        color1 = mix(vec3(1,0,0.5), vec3(1,0,0), (hue - 0.833) * 6.0);
+        color2 = mix(vec3(1,0,0), vec3(1,0.5,0), (hue - 0.833) * 6.0);
+    }
+
+    return pattern < 0.5 ? color1 * 0.6 : color2 * 0.6;
+}
+
+// Lighting calculation
+vec3 calculateLighting(vec3 hitPoint, vec3 normal, vec3 lightPos, vec3 baseColor, int material) {
+    // For checkered ground, get pattern color
+    if (material == MATERIAL_CHECKERED) {
+        baseColor = getCheckeredColor(hitPoint);
+    }
+
     vec3 lightDir = normalize(lightPos - hitPoint);
     float diff = max(dot(normal, lightDir), 0.0);
 
-    // Add specular highlight
     vec3 viewDir = normalize(-hitPoint);
     vec3 halfDir = normalize(lightDir + viewDir);
     float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
 
-    vec3 ambient = 0.2 * baseColor;
+    vec3 ambient = 0.3 * baseColor;
     vec3 diffuse = diff * baseColor;
     vec3 specular = spec * vec3(0.3);
 
     return ambient + diffuse + specular;
 }
 
-// Trace ray through scene
-const int NUM_SPHERES = 22;
+// Reduced sphere count
+const int NUM_SPHERES = 20;
 
 bool traceRay(Ray ray, out HitRecord hit, Sphere spheres[NUM_SPHERES]) {
     float closestT = 1000000.0;
@@ -133,12 +175,12 @@ bool traceRay(Ray ray, out HitRecord hit, Sphere spheres[NUM_SPHERES]) {
     return false;
 }
 
-// Trace a single ray and return color
+// Trace with reduced bounces
 vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
     vec3 finalColor = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    const int MAX_BOUNCES = 6;
+    const int MAX_BOUNCES = 8;
 
     for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
         HitRecord hit;
@@ -146,10 +188,10 @@ vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
         if (traceRay(ray, hit, spheres)) {
             Sphere sphere = spheres[hit.sphereIndex];
 
-            if (sphere.material == MATERIAL_DIFFUSE) {
-                vec3 color = calculateLighting(hit.point, hit.normal, lightPos, sphere.color);
+            if (sphere.material == MATERIAL_DIFFUSE || sphere.material == MATERIAL_CHECKERED) {
+                vec3 color = calculateLighting(hit.point, hit.normal, lightPos, sphere.color, sphere.material);
 
-                // Check shadow
+                // Shadow check
                 Ray shadowRay;
                 shadowRay.origin = hit.point + hit.normal * 0.001;
                 shadowRay.direction = normalize(lightPos - hit.point);
@@ -160,6 +202,10 @@ vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
                 }
 
                 finalColor += throughput * color;
+                break;
+
+            } else if (sphere.material == MATERIAL_EMISSIVE) {
+                finalColor += throughput * sphere.color * 3.0;
                 break;
 
             } else if (sphere.material == MATERIAL_MIRROR) {
@@ -190,7 +236,7 @@ vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
                     reflectProb = schlick(cosine, sphere.ior);
                 }
 
-                if (bounce % 2 == 0 && reflectProb < 0.9) {
+                if (hash3D(hit.point + vec3(bounce)) > reflectProb) {
                     ray.origin = hit.point - outwardNormal * 0.001;
                     ray.direction = refracted;
                 } else {
@@ -202,10 +248,22 @@ vec3 traceColoredRay(Ray ray, Sphere spheres[NUM_SPHERES], vec3 lightPos) {
             }
 
         } else {
-            // Hit sky - colorful gradient
-            float t = 0.5 * (ray.direction.y + 1.0);
-            vec3 skyColor = mix(vec3(1.0, 0.8, 0.6), vec3(0.3, 0.5, 1.0), t);
-            finalColor += throughput * skyColor;
+            // Vibrant colorful sky gradient
+            float t = ray.direction.y * 0.5 + 0.5;
+            vec3 skyColorHorizon = vec3(0.4, 0.7, 1.0);
+            vec3 skyColorZenith = vec3(0.1, 0.3, 0.8);
+            vec3 skyColorSunset = vec3(1.0, 0.6, 0.4);
+
+            // Mix between colors based on direction
+            float sunsetFactor = max(0.0, -ray.direction.y + 0.2) * 2.0;
+            vec3 skyColor = mix(skyColorZenith, skyColorHorizon, t);
+            skyColor = mix(skyColor, skyColorSunset, sunsetFactor * 0.5);
+
+            // Add some variation based on horizontal direction
+            float horizontalVariation = sin(atan(ray.direction.z, ray.direction.x) * 3.0) * 0.1 + 0.1;
+            skyColor += vec3(horizontalVariation * 0.3, horizontalVariation * 0.2, horizontalVariation * 0.1);
+
+            finalColor += throughput * skyColor * 1.5;
             break;
         }
     }
@@ -218,16 +276,21 @@ void main() {
     ivec2 size = imageSize(image);
 
     if (texelCoord.x < size.x && texelCoord.y < size.y) {
-        // Set up camera
-        vec3 cameraPos = vec3(0.0, 2.0, 10.0);
-        vec3 cameraTarget = vec3(0.0, 0.0, 0.0);
+        float time = PushConstants.data_1.x;
+
+        // Orbiting camera based on time
+        float camAngle = time * 0.5;
+        float camRadius = 7.0;
+        float camHeight = 2.5 + sin(time * 0.3) * 0.5;
+        vec3 cameraPos = vec3(cos(camAngle) * camRadius, camHeight, sin(camAngle) * camRadius);
+        vec3 cameraTarget = vec3(0.0, 0.5, 0.0);
         vec3 cameraUp = vec3(0.0, 1.0, 0.0);
 
         vec3 forward = normalize(cameraTarget - cameraPos);
         vec3 right = normalize(cross(forward, cameraUp));
         vec3 up = cross(right, forward);
 
-        // Define colorful scene
+        // Scene with 20 spheres
         Sphere spheres[NUM_SPHERES];
 
         // Center glass sphere
@@ -237,98 +300,105 @@ void main() {
         spheres[0].material = MATERIAL_GLASS;
         spheres[0].ior = 1.5;
 
-        // Large mirror sphere behind
-        spheres[1].center = vec3(-3.0, 1.0, -2.0);
-        spheres[1].radius = 1.0;
-        spheres[1].color = vec3(1.0, 0.9, 0.8);
-        spheres[1].material = MATERIAL_MIRROR;
+        // Two emissive lights
+        spheres[1].center = vec3(3.0, 3.0, 2.0);
+        spheres[1].radius = 0.5;
+        spheres[1].color = vec3(1.0, 0.5, 0.8);
+        spheres[1].material = MATERIAL_EMISSIVE;
         spheres[1].ior = 0.0;
 
-        // Colorful small spheres arranged in a circle
-        for (int i = 0; i < 12; i++) {
-            float angle = float(i) * 3.14159 * 2.0 / 12.0;
-            float radius = 4.5;
+        spheres[2].center = vec3(-3.0, 2.5, 2.0);
+        spheres[2].radius = 0.5;
+        spheres[2].color = vec3(0.5, 0.8, 1.0);
+        spheres[2].material = MATERIAL_EMISSIVE;
+        spheres[2].ior = 0.0;
 
-            spheres[i + 2].center = vec3(cos(angle) * radius, 0.3, sin(angle) * radius);
-            spheres[i + 2].radius = 0.4;
+        // Ring of colored spheres
+        for (int i = 0; i < 8; i++) {
+            float angle = float(i) / 8.0 * 6.28318;
+            float radius = 3.5;
 
-            // Rainbow colors
-            float hue = float(i) / 12.0;
+            spheres[i + 3].center = vec3(cos(angle) * radius, 0.3, sin(angle) * radius);
+            spheres[i + 3].radius = 0.4;
+
+            float hue = float(i) / 8.0;
             vec3 color;
-            if (hue < 0.166) color = mix(vec3(1,0,0), vec3(1,1,0), hue * 6.0);
-            else if (hue < 0.333) color = mix(vec3(1,1,0), vec3(0,1,0), (hue - 0.166) * 6.0);
-            else if (hue < 0.5) color = mix(vec3(0,1,0), vec3(0,1,1), (hue - 0.333) * 6.0);
-            else if (hue < 0.666) color = mix(vec3(0,1,1), vec3(0,0,1), (hue - 0.5) * 6.0);
-            else if (hue < 0.833) color = mix(vec3(0,0,1), vec3(1,0,1), (hue - 0.666) * 6.0);
-            else color = mix(vec3(1,0,1), vec3(1,0,0), (hue - 0.833) * 6.0);
+            if (hue < 0.33) color = mix(vec3(1,0,0), vec3(0,1,0), hue * 3.0);
+            else if (hue < 0.66) color = mix(vec3(0,1,0), vec3(0,0,1), (hue - 0.33) * 3.0);
+            else color = mix(vec3(0,0,1), vec3(1,0,0), (hue - 0.66) * 3.0);
 
-            spheres[i + 2].color = color;
-            spheres[i + 2].material = MATERIAL_DIFFUSE;
-            spheres[i + 2].ior = 0.0;
+            spheres[i + 3].color = color;
+            spheres[i + 3].material = MATERIAL_DIFFUSE;
+            spheres[i + 3].ior = 0.0;
         }
 
-        // Small glass spheres floating
-        spheres[14].center = vec3(2.0, 2.5, 1.0);
-        spheres[14].radius = 0.5;
-        spheres[14].color = vec3(1.0, 0.8, 0.8);
-        spheres[14].material = MATERIAL_GLASS;
-        spheres[14].ior = 1.8;
+        // Few glass spheres
+        spheres[11].center = vec3(2.0, 1.5, 1.0);
+        spheres[11].radius = 0.5;
+        spheres[11].color = vec3(1.0, 0.9, 0.9);
+        spheres[11].material = MATERIAL_GLASS;
+        spheres[11].ior = 1.7;
 
-        spheres[15].center = vec3(-2.0, 2.8, 2.0);
+        spheres[12].center = vec3(-2.0, 1.8, 1.5);
+        spheres[12].radius = 0.4;
+        spheres[12].color = vec3(0.9, 1.0, 0.9);
+        spheres[12].material = MATERIAL_GLASS;
+        spheres[12].ior = 1.6;
+
+        // Couple mirrors
+        spheres[13].center = vec3(-2.5, 1.0, -1.0);
+        spheres[13].radius = 0.8;
+        spheres[13].color = vec3(0.95, 0.95, 0.98);
+        spheres[13].material = MATERIAL_MIRROR;
+        spheres[13].ior = 0.0;
+
+        spheres[14].center = vec3(3.0, 1.2, 0.0);
+        spheres[14].radius = 0.7;
+        spheres[14].color = vec3(0.98, 0.95, 0.95);
+        spheres[14].material = MATERIAL_MIRROR;
+        spheres[14].ior = 0.0;
+
+        // A few more colorful diffuse
+        spheres[15].center = vec3(1.5, 0.4, 3.0);
         spheres[15].radius = 0.4;
-        spheres[15].color = vec3(0.8, 1.0, 0.8);
-        spheres[15].material = MATERIAL_GLASS;
-        spheres[15].ior = 1.6;
+        spheres[15].color = vec3(1.0, 0.7, 0.2);
+        spheres[15].material = MATERIAL_DIFFUSE;
+        spheres[15].ior = 0.0;
 
-        // More colorful diffuse spheres
-        spheres[16].center = vec3(3.5, 0.6, 2.0);
-        spheres[16].radius = 0.6;
-        spheres[16].color = vec3(1.0, 0.3, 0.7);
+        spheres[16].center = vec3(-1.5, 0.5, 3.5);
+        spheres[16].radius = 0.5;
+        spheres[16].color = vec3(0.7, 0.2, 1.0);
         spheres[16].material = MATERIAL_DIFFUSE;
         spheres[16].ior = 0.0;
 
-        spheres[17].center = vec3(-3.5, 0.5, 3.0);
-        spheres[17].radius = 0.5;
-        spheres[17].color = vec3(0.3, 1.0, 0.7);
+        spheres[17].center = vec3(0.0, 0.3, 4.0);
+        spheres[17].radius = 0.3;
+        spheres[17].color = vec3(0.2, 1.0, 0.7);
         spheres[17].material = MATERIAL_DIFFUSE;
         spheres[17].ior = 0.0;
 
-        spheres[18].center = vec3(1.5, 0.4, 4.0);
-        spheres[18].radius = 0.4;
-        spheres[18].color = vec3(1.0, 0.7, 0.2);
-        spheres[18].material = MATERIAL_DIFFUSE;
-        spheres[18].ior = 0.0;
+        // Small accent sphere
+        spheres[18].center = vec3(0.0, 2.5, 0.0);
+        spheres[18].radius = 0.3;
+        spheres[18].color = vec3(1.0, 0.9, 0.5);
+        spheres[18].material = MATERIAL_GLASS;
+        spheres[18].ior = 2.0;
 
-        // Mirror sphere on the right
-        spheres[19].center = vec3(4.0, 1.2, -1.0);
-        spheres[19].radius = 0.8;
-        spheres[19].color = vec3(0.9, 0.9, 1.0);
-        spheres[19].material = MATERIAL_MIRROR;
+        // Colorful checkered ground plane
+        spheres[19].center = vec3(0.0, -100.5, 0.0);
+        spheres[19].radius = 100.0;
+        spheres[19].color = vec3(1.0, 1.0, 1.0); // Will be replaced by checkered pattern
+        spheres[19].material = MATERIAL_CHECKERED;
         spheres[19].ior = 0.0;
 
-        // Small colored glass sphere
-        spheres[20].center = vec3(-1.5, 1.5, 3.0);
-        spheres[20].radius = 0.5;
-        spheres[20].color = vec3(0.9, 0.8, 1.0);
-        spheres[20].material = MATERIAL_GLASS;
-        spheres[20].ior = 1.7;
-
-        // Ground plane
-        spheres[21].center = vec3(0.0, -100.5, 0.0);
-        spheres[21].radius = 100.0;
-        spheres[21].color = vec3(0.6, 0.6, 0.7);
-        spheres[21].material = MATERIAL_DIFFUSE;
-        spheres[21].ior = 0.0;
-
         // Light position
-        vec3 lightPos = vec3(5.0, 8.0, 6.0);
+        vec3 lightPos = vec3(4.0, 6.0, 5.0);
 
-        // Anti-aliasing with 4 samples per pixel
+        // Reduced AA samples
         vec3 accumulatedColor = vec3(0.0);
-        const int AA_SAMPLES = 4;
+        const int AA_SAMPLES = 8;
 
         for (int sampleIdx = 0; sampleIdx < AA_SAMPLES; sampleIdx++) {
-            // Jitter offset for anti-aliasing
             vec2 jitter = vec2(
             hash(vec2(texelCoord) + float(sampleIdx) * 0.1) - 0.5,
             hash(vec2(texelCoord) + float(sampleIdx) * 0.2) - 0.5
@@ -340,7 +410,6 @@ void main() {
             ndc.y = -ndc.y;
             ndc.x *= float(size.x) / float(size.y);
 
-            // Create ray
             Ray ray;
             ray.origin = cameraPos;
             ray.direction = normalize(forward + ndc.x * right + ndc.y * up);
@@ -348,12 +417,11 @@ void main() {
             accumulatedColor += traceColoredRay(ray, spheres, lightPos);
         }
 
-        // Average the samples
         vec3 finalColor = accumulatedColor / float(AA_SAMPLES);
 
-        // Tone mapping for better color
+        // Simple tone mapping
         finalColor = finalColor / (finalColor + vec3(1.0));
-        finalColor = pow(finalColor, vec3(1.0 / 2.2)); // Gamma correction
+        finalColor = pow(finalColor, vec3(1.0 / 2.2));
 
         imageStore(image, texelCoord, vec4(finalColor, 1.0));
     }
