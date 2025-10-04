@@ -186,6 +186,15 @@ void VulkanEngine::draw() {
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipeline);
     // Bind the descriptor sets
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipelineLayout, 0, 1, &_drawImageDescriptorSet, 0, nullptr);
+
+    // Set the values of the Push-Constants for the shaders
+    ComputeShaderPushConstants compute_push_constants{};
+    float time_elapsed = (SDL_GetTicks() / 1000.f);
+    float speed_multiplier = 1.0f;
+    compute_push_constants.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
+    compute_push_constants.data_2 = glm::vec4(1, 0, 0, 0);
+    vkCmdPushConstants(commandBuffer, _backgroundImgPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputeShaderPushConstants), &compute_push_constants);
+
     // Execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it to get total group-counts needed along X and Y
     vkCmdDispatch(commandBuffer, std::ceil(_drawImageExtent.width / 16.0), std::ceil(_drawImageExtent.height / 16.0), 1);
 
@@ -810,6 +819,15 @@ void VulkanEngine::init_background_img_pipeline() {
     pipelineLayoutCreateInfo.pNext = nullptr;
     pipelineLayoutCreateInfo.pSetLayouts = &_drawImageDescriptorSetLayout;
     pipelineLayoutCreateInfo.setLayoutCount = 1;
+
+    // Define the push-constant range for the compute-shaders
+    VkPushConstantRange computePushConstantRange {};
+    computePushConstantRange.offset = 0;
+    computePushConstantRange.size = sizeof(ComputeShaderPushConstants);
+    computePushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges = &computePushConstantRange;
 
     VkResult result = vkCreatePipelineLayout(_device, &pipelineLayoutCreateInfo, nullptr, &_backgroundImgPipelineLayout);
     if (result != VK_SUCCESS) {

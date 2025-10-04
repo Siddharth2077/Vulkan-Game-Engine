@@ -44,6 +44,14 @@ struct FrameData {
 	DeletionQueue deletionQueue;
 };
 
+/// The vec4 parameters corresponding to the push-constants used in the compute-shaders
+struct ComputeShaderPushConstants {
+	glm::vec4 data_1;
+	glm::vec4 data_2;
+	glm::vec4 data_3;
+	glm::vec4 data_4;
+};
+
 
 /// The main Vulkan Engine class.
 ///
