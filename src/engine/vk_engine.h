@@ -130,9 +130,13 @@ private:
 	VkDescriptorSet _drawImageDescriptorSet;
 	VkDescriptorSetLayout _drawImageDescriptorSetLayout;
 
-	// Pipelines
+	// Compute-Pipelines
 	VkPipeline _backgroundImgPipeline;
 	VkPipelineLayout _backgroundImgPipelineLayout;
+
+	// Graphics-Pipelines
+	VkPipeline _trianglePipeline;
+	VkPipelineLayout _trianglePipelineLayout;
 
 	// Immediate Submit Structures
 	VkFence _immediateFence{ nullptr };
@@ -153,8 +157,13 @@ private:
 
 	void init_vulkan_memory_allocator();
 	void init_descriptors();
-	void init_background_img_pipeline();
 	void init_imgui();
+
+	// Compute-Pipeline Initializers
+	void init_background_img_pipeline();
+
+	// Graphics-Pipeline Initializers
+	void init_triangle_pipeline();
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();

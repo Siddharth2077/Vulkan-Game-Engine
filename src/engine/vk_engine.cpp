@@ -162,7 +162,7 @@ void VulkanEngine::draw() {
     _drawImageExtent.height = _drawImage.imageExtent.height;
 
     // OPTIMIZED: Transition draw-image for writing into it
-    // From undefined (don't care) to general (for clear operation)
+    // From undefined (don't care) to general for compute-shader write operation
     vkutil::transition_image_layout(
         commandBuffer,
         _drawImage.image,
@@ -174,7 +174,7 @@ void VulkanEngine::draw() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT              // Clear operation writes
     );
 
-    // Draw into the image using a compute-shader:
+    // Draw into the image using the Compute-Pipeline:
     VkImageSubresourceRange imageSubresourceRange {};
     imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceRange.baseMipLevel = 0;
@@ -200,17 +200,81 @@ void VulkanEngine::draw() {
     // Execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it to get total group-counts needed along X and Y
     vkCmdDispatch(commandBuffer, std::ceil(_drawImageExtent.width / 16.0), std::ceil(_drawImageExtent.height / 16.0), 1);
 
+
+    // Draw onto the image using the Graphics-Pipeline:
+    // Transition the draw-image from GENERAL to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _drawImage.image,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,             // Wait for compute shader to finish
+        VK_ACCESS_2_SHADER_WRITE_BIT,                       // Compute shader was writing
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,    // Before color attachment writes
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT              // Graphics will write to color attachment
+    );
+
+    // Draw the geometry:
+    VkRenderingAttachmentInfo colorAttachmentInfo {};
+    colorAttachmentInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachmentInfo.pNext = nullptr;
+    colorAttachmentInfo.imageView = _drawImage.imageView;
+    colorAttachmentInfo.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachmentInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo {};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.pNext = nullptr;
+    renderingInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, _drawImageExtent };
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachmentInfo;
+    renderingInfo.pDepthAttachment = nullptr;
+    renderingInfo.pStencilAttachment = nullptr;
+
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, _trianglePipeline);
+
+    // Set dynamic viewport and scissor
+    VkViewport dynamicViewport {};
+    dynamicViewport.x = 0;
+    dynamicViewport.y = 0;
+    dynamicViewport.width = _drawImageExtent.width;
+    dynamicViewport.height = _drawImageExtent.height;
+    dynamicViewport.minDepth = 0.0f;
+    dynamicViewport.maxDepth = 1.0f;
+
+    vkCmdSetViewport(commandBuffer, 0, 1, &dynamicViewport);
+
+    VkRect2D dynamicScissor {};
+    dynamicScissor.offset.x = 0;
+    dynamicScissor.offset.y = 0;
+    dynamicScissor.extent.width = _drawImageExtent.width;
+    dynamicScissor.extent.height = _drawImageExtent.height;
+
+    vkCmdSetScissor(commandBuffer, 0, 1, &dynamicScissor);
+
+    // Launch a draw-command to draw 3 vertices
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    vkCmdEndRendering(commandBuffer);
+
+
+
+
     // OPTIMIZED: Transition draw-image for blit source
     // From general (after clear) to transfer source optimal
     vkutil::transition_image_layout(
         commandBuffer,
         _drawImage.image,
-        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_PIPELINE_STAGE_2_CLEAR_BIT,            // Wait for clear to finish
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,           // Clear wrote to image
-        VK_PIPELINE_STAGE_2_BLIT_BIT,             // Prepare for blit
-        VK_ACCESS_2_TRANSFER_READ_BIT             // Blit will read from image
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  // Wait for color attachment writes
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,           // Graphics wrote to attachment
+        VK_PIPELINE_STAGE_2_BLIT_BIT,                     // Before blit operation
+        VK_ACCESS_2_TRANSFER_READ_BIT                     // Blit will read from image
     );
 
     // OPTIMIZED: Transition swapchain image for blit destination
@@ -761,6 +825,7 @@ void VulkanEngine::init_sync_structures() {
 
 void VulkanEngine::init_pipelines() {
     init_background_img_pipeline();
+    init_triangle_pipeline();
 }
 
 void VulkanEngine::init_vulkan_memory_allocator() {
@@ -826,6 +891,74 @@ void VulkanEngine::init_descriptors() {
         vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorSetLayout, nullptr);
     });
 }
+
+void VulkanEngine::init_imgui() {
+    // 1. Create the Descriptor-Pool for ImGui
+    // The descriptor pool is very oversized, but its as per the ImGui-demo
+    const VkDescriptorPoolSize imgui_descriptor_pool_sizes[] = {
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+    };
+
+    VkDescriptorPoolCreateInfo imgui_descriptor_pool_create_info = {};
+    imgui_descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    imgui_descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    imgui_descriptor_pool_create_info.maxSets = 1000;
+    imgui_descriptor_pool_create_info.poolSizeCount = static_cast<uint32_t>(std::size(imgui_descriptor_pool_sizes));
+    imgui_descriptor_pool_create_info.pPoolSizes = imgui_descriptor_pool_sizes;
+
+    VkDescriptorPool imguiDescriptorPool {VK_NULL_HANDLE};
+    VkResult result = vkCreateDescriptorPool(_device, &imgui_descriptor_pool_create_info, nullptr, &imguiDescriptorPool);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create descriptor-pool for ImGUI");
+        throw std::runtime_error("Failed to create descriptor-pool for ImGUI");
+    }
+    VK_LOG_SUCCESS("Created descriptor-pool for ImGUI");
+
+
+    // 2. Initialize the ImGui library:
+
+    // Initializes the core structures of ImGui
+    ImGui::CreateContext();
+
+    // Initialize ImGui for SDL3
+    ImGui_ImplSDL3_InitForVulkan(_window);
+
+    // Initialize ImGui for Vulkan
+    ImGui_ImplVulkan_InitInfo imgui_impl_vulkan_init_info {};
+    imgui_impl_vulkan_init_info.Instance = _vulkanInstance;
+    imgui_impl_vulkan_init_info.PhysicalDevice = _physicalDevice;
+    imgui_impl_vulkan_init_info.Device = _device;
+    imgui_impl_vulkan_init_info.Queue = _graphicsQueue;
+    imgui_impl_vulkan_init_info.DescriptorPool = imguiDescriptorPool;
+    imgui_impl_vulkan_init_info.MinImageCount = 3;
+    imgui_impl_vulkan_init_info.ImageCount = 3;
+    imgui_impl_vulkan_init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;  // No MSAA
+    // Dynamic rendering parameters for ImGui to use:
+    imgui_impl_vulkan_init_info.UseDynamicRendering = true;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+
+    ImGui_ImplVulkan_Init(&imgui_impl_vulkan_init_info);
+    VK_LOG_SUCCESS("Initialized ImGui");
+
+    // Queue for deletion
+    _mainDeletionQueue.push_deleter([this, imguiDescriptorPool]() {
+        ImGui_ImplVulkan_Shutdown();
+        vkDestroyDescriptorPool(_device, imguiDescriptorPool, nullptr);
+    });
+}
+
 
 void VulkanEngine::init_background_img_pipeline() {
     // Create the Pipeline-Layout
@@ -937,72 +1070,70 @@ void VulkanEngine::init_background_img_pipeline() {
     });
 }
 
-void VulkanEngine::init_imgui() {
-    // 1. Create the Descriptor-Pool for ImGui
-    // The descriptor pool is very oversized, but its as per the ImGui-demo
-    const VkDescriptorPoolSize imgui_descriptor_pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
-        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
-    };
-
-    VkDescriptorPoolCreateInfo imgui_descriptor_pool_create_info = {};
-    imgui_descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    imgui_descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    imgui_descriptor_pool_create_info.maxSets = 1000;
-    imgui_descriptor_pool_create_info.poolSizeCount = static_cast<uint32_t>(std::size(imgui_descriptor_pool_sizes));
-    imgui_descriptor_pool_create_info.pPoolSizes = imgui_descriptor_pool_sizes;
-
-    VkDescriptorPool imguiDescriptorPool {VK_NULL_HANDLE};
-    VkResult result = vkCreateDescriptorPool(_device, &imgui_descriptor_pool_create_info, nullptr, &imguiDescriptorPool);
-    if (result != VK_SUCCESS) {
-        VK_LOG_ERROR("Failed to create descriptor-pool for ImGUI");
-        throw std::runtime_error("Failed to create descriptor-pool for ImGUI");
+void VulkanEngine::init_triangle_pipeline() {
+    // Load the SpirV compiled fragment-shaders
+    VkShaderModule triangleVertexShaderModule;
+    if (!vkutil::load_shader_module(_device, &triangleVertexShaderModule, "./shaders/triangle.vert.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: triangle.vert.spv");
+        throw std::runtime_error("Failed to load SpirV shader: triangle.vert.spv");
     }
-    VK_LOG_SUCCESS("Created descriptor-pool for ImGUI");
+    VK_LOG_INFO("Loaded SpirV shader: triangle.vert.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: triangle.vert.spv");
+
+    VkShaderModule triangleFragmentShaderModule;
+    if (!vkutil::load_shader_module(_device, &triangleFragmentShaderModule, "./shaders/triangle.frag.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: triangle.frag.spv");
+        throw std::runtime_error("Failed to load SpirV shader: triangle.frag.spv");
+    }
+    VK_LOG_INFO("Loaded SpirV shader: triangle.frag.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: triangle.frag.spv");
 
 
-    // 2. Initialize the ImGui library:
+    // Create the pipeline layout
+    VkPipelineLayoutCreateInfo triangle_pipeline_layout_info {};
+    triangle_pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    triangle_pipeline_layout_info.pNext = nullptr;
+    // empty defaults
+    triangle_pipeline_layout_info.flags = 0;
+    triangle_pipeline_layout_info.setLayoutCount = 0;
+    triangle_pipeline_layout_info.pSetLayouts = nullptr;
+    triangle_pipeline_layout_info.pushConstantRangeCount = 0;
+    triangle_pipeline_layout_info.pPushConstantRanges = nullptr;
 
-    // Initializes the core structures of ImGui
-    ImGui::CreateContext();
+    VkResult result = vkCreatePipelineLayout(_device, &triangle_pipeline_layout_info, nullptr, &_trianglePipelineLayout);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create triangle pipeline-layout");
+        throw std::runtime_error("Failed to create triangle pipeline-layout");
+    }
+    VK_LOG_SUCCESS("Created triangle pipeline-layout");
 
-    // Initialize ImGui for SDL3
-    ImGui_ImplSDL3_InitForVulkan(_window);
+    // Create the Graphics-Pipeline
+    GraphicsPipelineBuilder graphics_pipeline_builder{};
+    graphics_pipeline_builder.set_pipeline_layout(_trianglePipelineLayout);
+    graphics_pipeline_builder.set_shader_modules(triangleVertexShaderModule, triangleFragmentShaderModule);
+    graphics_pipeline_builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    graphics_pipeline_builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    graphics_pipeline_builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    graphics_pipeline_builder.set_multisampling_none();
+    graphics_pipeline_builder.set_blending_none();
+    graphics_pipeline_builder.disable_depth_testing();
+    graphics_pipeline_builder.set_color_attachment_format(_drawImage.imageFormat);
+    graphics_pipeline_builder.set_depth_attachment_format(VK_FORMAT_UNDEFINED);
 
-    // Initialize ImGui for Vulkan
-    ImGui_ImplVulkan_InitInfo imgui_impl_vulkan_init_info {};
-    imgui_impl_vulkan_init_info.Instance = _vulkanInstance;
-    imgui_impl_vulkan_init_info.PhysicalDevice = _physicalDevice;
-    imgui_impl_vulkan_init_info.Device = _device;
-    imgui_impl_vulkan_init_info.Queue = _graphicsQueue;
-    imgui_impl_vulkan_init_info.DescriptorPool = imguiDescriptorPool;
-    imgui_impl_vulkan_init_info.MinImageCount = 3;
-    imgui_impl_vulkan_init_info.ImageCount = 3;
-    imgui_impl_vulkan_init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;  // No MSAA
-    // Dynamic rendering parameters for ImGui to use:
-    imgui_impl_vulkan_init_info.UseDynamicRendering = true;
-    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+    _trianglePipeline = graphics_pipeline_builder.build_pipeline(_device);
 
-    ImGui_ImplVulkan_Init(&imgui_impl_vulkan_init_info);
-    VK_LOG_SUCCESS("Initialized ImGui");
+    // Destroy the shader-modules
+    vkDestroyShaderModule(_device, triangleVertexShaderModule, nullptr);
+    vkDestroyShaderModule(_device, triangleFragmentShaderModule, nullptr);
 
-    // Queue for deletion
-    _mainDeletionQueue.push_deleter([this, imguiDescriptorPool]() {
-        ImGui_ImplVulkan_Shutdown();
-        vkDestroyDescriptorPool(_device, imguiDescriptorPool, nullptr);
+
+    // Queue cleanup deletion
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyPipelineLayout(_device, _trianglePipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _trianglePipeline, nullptr);
     });
 }
+
 
 void VulkanEngine::create_swapchain(uint32_t width, uint32_t height) {
     vkb::SwapchainBuilder swapchainBuilder {_physicalDevice, _device, _surface};
