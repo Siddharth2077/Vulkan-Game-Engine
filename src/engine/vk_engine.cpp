@@ -8,13 +8,17 @@
 #include <chrono>
 #include <thread>
 #include <VkBootstrap.h>
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_vulkan.h"
 
 #include "vk_images.h"
 #include "vk_logger.h"
 #include "vk_pipelines.h"
 
 constexpr bool bUseValidationLayers {true};
-constexpr uint64_t ENGINE_TIMEOUT_1_SECOND {1000000000};
+constexpr uint64_t ENGINE_TIMEOUT_1_SECOND      {1000000000};   // in nanoseconds
+constexpr uint64_t ENGINE_TIMEOUT_10_SECONDS    {10000000000};  // in nanoseconds
 
 // Global pointer to the Singleton Instance of the engine.
 VulkanEngine* loadedEngine = nullptr;
@@ -55,6 +59,7 @@ void VulkanEngine::init() {
     init_sync_structures();
     init_descriptors();
     init_pipelines();
+    init_imgui();
 
     // Everything went fine
     _isInitialized = true;
@@ -140,6 +145,7 @@ void VulkanEngine::draw() {
     // Begin the command buffer recording
     VkCommandBufferBeginInfo commandBufferBeginInfo {};
     commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    commandBufferBeginInfo.pNext = nullptr;
     commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     result = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
     if (result != VK_SUCCESS) {
@@ -156,7 +162,7 @@ void VulkanEngine::draw() {
     _drawImageExtent.height = _drawImage.imageExtent.height;
 
     // OPTIMIZED: Transition draw-image for writing into it
-    // From undefined (don't care) to general (for clear operation)
+    // From undefined (don't care) to general for compute-shader write operation
     vkutil::transition_image_layout(
         commandBuffer,
         _drawImage.image,
@@ -168,7 +174,7 @@ void VulkanEngine::draw() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT              // Clear operation writes
     );
 
-    // Draw into the image using a compute-shader:
+    // Draw into the image using the Compute-Pipeline:
     VkImageSubresourceRange imageSubresourceRange {};
     imageSubresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceRange.baseMipLevel = 0;
@@ -176,24 +182,99 @@ void VulkanEngine::draw() {
     imageSubresourceRange.baseArrayLayer = 0;
     imageSubresourceRange.layerCount = 1;
 
-    // Bind the pipeline for drawing with compute
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipeline);
+    // Bind the pipeline for drawing with compute (Use the currently selected one in the UI)
+    ComputeShaderEffects& currentShaderEffect = _computeShaderBackgroundEffects.at(_currentComputeShaderBackgroundEffect);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, currentShaderEffect.pipeline);
     // Bind the descriptor sets
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, _backgroundImgPipelineLayout, 0, 1, &_drawImageDescriptorSet, 0, nullptr);
+
+    // Set the values of the Push-Constants for the shaders
+    float time_elapsed = (SDL_GetTicks() / 1000.f);
+    float speed_multiplier = 1.0f;
+    currentShaderEffect.push_constants_data.data_1 = glm::vec4(time_elapsed * speed_multiplier, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_2 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_3 = glm::vec4(0, 0, 0, 0);
+    currentShaderEffect.push_constants_data.data_4 = glm::vec4(0, 0, 0, 0);
+    vkCmdPushConstants(commandBuffer, _backgroundImgPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputeShaderPushConstants), &currentShaderEffect.push_constants_data);
+
     // Execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it to get total group-counts needed along X and Y
     vkCmdDispatch(commandBuffer, std::ceil(_drawImageExtent.width / 16.0), std::ceil(_drawImageExtent.height / 16.0), 1);
+
+
+    // Draw onto the image using the Graphics-Pipeline:
+    // Transition the draw-image from GENERAL to VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    vkutil::transition_image_layout(
+        commandBuffer,
+        _drawImage.image,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,             // Wait for compute shader to finish
+        VK_ACCESS_2_SHADER_WRITE_BIT,                       // Compute shader was writing
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,    // Before color attachment writes
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT              // Graphics will write to color attachment
+    );
+
+    // Draw the geometry:
+    VkRenderingAttachmentInfo colorAttachmentInfo {};
+    colorAttachmentInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachmentInfo.pNext = nullptr;
+    colorAttachmentInfo.imageView = _drawImage.imageView;
+    colorAttachmentInfo.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachmentInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo {};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.pNext = nullptr;
+    renderingInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, _drawImageExtent };
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachmentInfo;
+    renderingInfo.pDepthAttachment = nullptr;
+    renderingInfo.pStencilAttachment = nullptr;
+
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, _trianglePipeline);
+
+    // Set dynamic viewport and scissor
+    VkViewport dynamicViewport {};
+    dynamicViewport.x = 0;
+    dynamicViewport.y = 0;
+    dynamicViewport.width = _drawImageExtent.width;
+    dynamicViewport.height = _drawImageExtent.height;
+    dynamicViewport.minDepth = 0.0f;
+    dynamicViewport.maxDepth = 1.0f;
+
+    vkCmdSetViewport(commandBuffer, 0, 1, &dynamicViewport);
+
+    VkRect2D dynamicScissor {};
+    dynamicScissor.offset.x = 0;
+    dynamicScissor.offset.y = 0;
+    dynamicScissor.extent.width = _drawImageExtent.width;
+    dynamicScissor.extent.height = _drawImageExtent.height;
+
+    vkCmdSetScissor(commandBuffer, 0, 1, &dynamicScissor);
+
+    // Launch a draw-command to draw 3 vertices
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+    vkCmdEndRendering(commandBuffer);
+
+
+
 
     // OPTIMIZED: Transition draw-image for blit source
     // From general (after clear) to transfer source optimal
     vkutil::transition_image_layout(
         commandBuffer,
         _drawImage.image,
-        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_PIPELINE_STAGE_2_CLEAR_BIT,            // Wait for clear to finish
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,           // Clear wrote to image
-        VK_PIPELINE_STAGE_2_BLIT_BIT,             // Prepare for blit
-        VK_ACCESS_2_TRANSFER_READ_BIT             // Blit will read from image
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,  // Wait for color attachment writes
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,           // Graphics wrote to attachment
+        VK_PIPELINE_STAGE_2_BLIT_BIT,                     // Before blit operation
+        VK_ACCESS_2_TRANSFER_READ_BIT                     // Blit will read from image
     );
 
     // OPTIMIZED: Transition swapchain image for blit destination
@@ -209,6 +290,7 @@ void VulkanEngine::draw() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT              // Blit will write to image
     );
 
+
     // Blit-copy from the draw-image to the swapchain-image to prepare it for presentation:
     vkutil::blit_image_to_image(
         commandBuffer,
@@ -217,6 +299,9 @@ void VulkanEngine::draw() {
         _drawImageExtent,
         _swapchainExtent
     );
+
+    // Draw the ImGui UI onto the current swapchain-image
+    draw_imgui(commandBuffer, _swapchainImageViews.at(swapchainImageIndex));
 
     // OPTIMIZED: Transition swapchain image for presentation
     // From transfer destination (after blit) to present source
@@ -313,6 +398,32 @@ void VulkanEngine::draw() {
     vkQueueWaitIdle(_graphicsQueue);
 }
 
+void VulkanEngine::draw_imgui(VkCommandBuffer commandBuffer, VkImageView targetImageView) {
+    VkRenderingAttachmentInfo colorAttachment {};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.pNext = nullptr;
+    colorAttachment.imageView = targetImageView;
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo {};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.pNext = nullptr;
+    renderingInfo.renderArea = VkRect2D { VkOffset2D { 0, 0 }, _swapchainExtent };
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
+    renderingInfo.pDepthAttachment = nullptr;
+    renderingInfo.pStencilAttachment = nullptr;
+
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+
+    vkCmdEndRendering(commandBuffer);
+}
+
 void VulkanEngine::run() {
     SDL_Event e;
     bool bQuit = false;
@@ -343,6 +454,9 @@ void VulkanEngine::run() {
                     default: break;
                 }
             }
+
+            // Pass the ImGui events to SDL-Event Handler
+            ImGui_ImplSDL3_ProcessEvent(&e);
         }
 
         // do not draw if we are minimized
@@ -352,8 +466,103 @@ void VulkanEngine::run() {
             continue;
         }
 
+        // ImGui new frame
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        if (ImGui::Begin("Switch Compute-Shader")) {
+            ComputeShaderEffects& selected = _computeShaderBackgroundEffects[_currentComputeShaderBackgroundEffect];
+
+            ImGui::Text("Selected effect: %s", selected.name);
+
+            ImGui::SliderInt("Effect Index", &_currentComputeShaderBackgroundEffect, 0, _computeShaderBackgroundEffects.size() - 1);
+
+            ImGui::InputFloat4("data-1",reinterpret_cast<float *>(&selected.push_constants_data.data_1));
+            ImGui::InputFloat4("data-2",reinterpret_cast<float *>(&selected.push_constants_data.data_2));
+            ImGui::InputFloat4("data-3",reinterpret_cast<float *>(&selected.push_constants_data.data_3));
+            ImGui::InputFloat4("data-4",reinterpret_cast<float *>(&selected.push_constants_data.data_4));
+        }
+        ImGui::End();
+
+        // ImGui's Render() method will only calculate the vertices/draws etc. needed by it to draw its frame
+        // But it doesn't do any drawing of its own. We will need to handle that in our Engine's draw function.
+        ImGui::Render();
+
+
+        // The Engine's draw function
         draw();
     }
+}
+
+void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer)> &&function) {
+    // Reset the fence and the command-buffer used for immediate submit calls
+    VkResult result = vkResetFences(_device, 1, &_immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to reset the immediate-fence inside immediate_submit() call");
+        throw std::runtime_error("Failed to reset the immediate-fence inside immediate_submit() call");
+    }
+    result = vkResetCommandBuffer(_immediateCommandBuffer, 0);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to reset immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to reset immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Begin the command-buffer for recording commands
+    VkCommandBufferBeginInfo immediateCommandBufferBeginInfo{};
+    immediateCommandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    immediateCommandBufferBeginInfo.pNext = nullptr;
+    immediateCommandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(_immediateCommandBuffer, &immediateCommandBufferBeginInfo);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to begin immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to begin immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Call the function passed as parameter:
+    function(_immediateCommandBuffer);
+
+    // End recording the command-buffer
+    result = vkEndCommandBuffer(_immediateCommandBuffer);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to end immediate command-buffer inside immediate_submit() call");
+        throw std::runtime_error("Failed to end immediate command-buffer inside immediate_submit() call");
+    }
+
+    // Submit the command buffer to the GPU and execute it
+    VkCommandBufferSubmitInfo immediateCommandBufferSubmitInfo {};
+    immediateCommandBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    immediateCommandBufferSubmitInfo.pNext = nullptr;
+    immediateCommandBufferSubmitInfo.commandBuffer = _immediateCommandBuffer;
+    immediateCommandBufferSubmitInfo.deviceMask = 0;
+
+    VkSubmitInfo2 cmdBufferSubmitInfo {};
+    cmdBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    cmdBufferSubmitInfo.pNext = nullptr;
+    cmdBufferSubmitInfo.commandBufferInfoCount = 1;
+    cmdBufferSubmitInfo.pCommandBufferInfos = &immediateCommandBufferSubmitInfo;
+    cmdBufferSubmitInfo.signalSemaphoreInfoCount = 0;
+    cmdBufferSubmitInfo.pSignalSemaphoreInfos = nullptr;
+    cmdBufferSubmitInfo.waitSemaphoreInfoCount = 0;
+    cmdBufferSubmitInfo.pWaitSemaphoreInfos = nullptr;
+
+    // Submit to the graphics queue.
+    // The _immediateFence will be blocked until the work is completed by the GPU
+    result = vkQueueSubmit2(_graphicsQueue, 1, &cmdBufferSubmitInfo, _immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to submit immediate command-buffer to the queue, inside immediate_submit() call");
+        throw std::runtime_error("Failed to submit immediate command-buffer to the queue, inside immediate_submit() call");
+    }
+    VK_LOG_INFO("Submitted immediate command-buffer to the queue");
+
+    // Wait for the immediate-fence (signals work completion of the immediate commands)
+    result = vkWaitForFences(_device, 1, &_immediateFence, true, ENGINE_TIMEOUT_10_SECONDS);
+    if (result != VK_SUCCESS) {
+        if (result == VK_TIMEOUT) {
+            VK_LOG_WARN("Timeout in waiting for _immediateFence inside immediate_submit() call");
+        }
+    }
+
 }
 
 
@@ -533,13 +742,42 @@ void VulkanEngine::init_commands() {
         }
     }
 
+
+    // Create the immediate command-pool and command-buffer
+    VkResult result = vkCreateCommandPool(_device, &command_pool_create_info, nullptr, &_immediateCommandPool);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate command-pool");
+        throw std::runtime_error("Failed to create immediate command-pool");
+    }
+    VK_LOG_SUCCESS("Created immediate command-pool");
+
+    VkCommandBufferAllocateInfo immediate_command_buffer_allocate_info{};
+    immediate_command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    immediate_command_buffer_allocate_info.pNext = nullptr;
+    immediate_command_buffer_allocate_info.commandPool = _immediateCommandPool;
+    immediate_command_buffer_allocate_info.commandBufferCount = 1;
+    immediate_command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    result = vkAllocateCommandBuffers(_device, &immediate_command_buffer_allocate_info, &_immediateCommandBuffer);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate command-buffer");
+        throw std::runtime_error("Failed to create immediate command-buffer");
+    }
+    VK_LOG_SUCCESS("Created immediate command-buffer");
+
+    // Queue the deletion of the immediate command-pool along with its allocated command-buffers
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyCommandPool(_device, _immediateCommandPool, nullptr);
+    });
+
 }
 
 void VulkanEngine::init_sync_structures() {
+    // Initialize the synchronization structures for the draw-loop:
     for (int i{0}; i < FRAME_OVERLAP; i++) {
         // We want the Fence to start in the signalled state, so we can wait on it on the first frame.
         VkFenceCreateInfo renderFenceCreateInfo{};
         renderFenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        renderFenceCreateInfo.pNext = nullptr;
         renderFenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
         VkSemaphoreCreateInfo semaphoreCreateInfo{};
@@ -565,10 +803,29 @@ void VulkanEngine::init_sync_structures() {
             throw std::runtime_error("Failed to create render finished semaphore");
         }
     }
+    VK_LOG_SUCCESS("Created sync structures for render-loop");
+
+    // Initialize the synchronization structures for the immediate-commands:
+    VkFenceCreateInfo immediateFenceCreateInfo {};
+    immediateFenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    immediateFenceCreateInfo.pNext = nullptr;
+    immediateFenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    VkResult result = vkCreateFence(_device, &immediateFenceCreateInfo, nullptr, &_immediateFence);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create immediate-fence");
+        throw std::runtime_error("Failed to create immediate-fence");
+    }
+    VK_LOG_SUCCESS("Created immediate-submit fence");
+
+    // Queue the deletion of the immediate-fence
+    _mainDeletionQueue.push_deleter([this]() {
+       vkDestroyFence(_device, _immediateFence, nullptr);
+    });
 }
 
 void VulkanEngine::init_pipelines() {
     init_background_img_pipeline();
+    init_triangle_pipeline();
 }
 
 void VulkanEngine::init_vulkan_memory_allocator() {
@@ -635,6 +892,74 @@ void VulkanEngine::init_descriptors() {
     });
 }
 
+void VulkanEngine::init_imgui() {
+    // 1. Create the Descriptor-Pool for ImGui
+    // The descriptor pool is very oversized, but its as per the ImGui-demo
+    const VkDescriptorPoolSize imgui_descriptor_pool_sizes[] = {
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+    };
+
+    VkDescriptorPoolCreateInfo imgui_descriptor_pool_create_info = {};
+    imgui_descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    imgui_descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    imgui_descriptor_pool_create_info.maxSets = 1000;
+    imgui_descriptor_pool_create_info.poolSizeCount = static_cast<uint32_t>(std::size(imgui_descriptor_pool_sizes));
+    imgui_descriptor_pool_create_info.pPoolSizes = imgui_descriptor_pool_sizes;
+
+    VkDescriptorPool imguiDescriptorPool {VK_NULL_HANDLE};
+    VkResult result = vkCreateDescriptorPool(_device, &imgui_descriptor_pool_create_info, nullptr, &imguiDescriptorPool);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create descriptor-pool for ImGUI");
+        throw std::runtime_error("Failed to create descriptor-pool for ImGUI");
+    }
+    VK_LOG_SUCCESS("Created descriptor-pool for ImGUI");
+
+
+    // 2. Initialize the ImGui library:
+
+    // Initializes the core structures of ImGui
+    ImGui::CreateContext();
+
+    // Initialize ImGui for SDL3
+    ImGui_ImplSDL3_InitForVulkan(_window);
+
+    // Initialize ImGui for Vulkan
+    ImGui_ImplVulkan_InitInfo imgui_impl_vulkan_init_info {};
+    imgui_impl_vulkan_init_info.Instance = _vulkanInstance;
+    imgui_impl_vulkan_init_info.PhysicalDevice = _physicalDevice;
+    imgui_impl_vulkan_init_info.Device = _device;
+    imgui_impl_vulkan_init_info.Queue = _graphicsQueue;
+    imgui_impl_vulkan_init_info.DescriptorPool = imguiDescriptorPool;
+    imgui_impl_vulkan_init_info.MinImageCount = 3;
+    imgui_impl_vulkan_init_info.ImageCount = 3;
+    imgui_impl_vulkan_init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;  // No MSAA
+    // Dynamic rendering parameters for ImGui to use:
+    imgui_impl_vulkan_init_info.UseDynamicRendering = true;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    imgui_impl_vulkan_init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+
+    ImGui_ImplVulkan_Init(&imgui_impl_vulkan_init_info);
+    VK_LOG_SUCCESS("Initialized ImGui");
+
+    // Queue for deletion
+    _mainDeletionQueue.push_deleter([this, imguiDescriptorPool]() {
+        ImGui_ImplVulkan_Shutdown();
+        vkDestroyDescriptorPool(_device, imguiDescriptorPool, nullptr);
+    });
+}
+
+
 void VulkanEngine::init_background_img_pipeline() {
     // Create the Pipeline-Layout
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
@@ -643,6 +968,15 @@ void VulkanEngine::init_background_img_pipeline() {
     pipelineLayoutCreateInfo.pSetLayouts = &_drawImageDescriptorSetLayout;
     pipelineLayoutCreateInfo.setLayoutCount = 1;
 
+    // Define the push-constant range for the compute-shaders
+    VkPushConstantRange computePushConstantRange {};
+    computePushConstantRange.offset = 0;
+    computePushConstantRange.size = sizeof(ComputeShaderPushConstants);
+    computePushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges = &computePushConstantRange;
+
     VkResult result = vkCreatePipelineLayout(_device, &pipelineLayoutCreateInfo, nullptr, &_backgroundImgPipelineLayout);
     if (result != VK_SUCCESS) {
         VK_LOG_ERROR("Failed to create pipeline-layout for background-img draw");
@@ -650,44 +984,156 @@ void VulkanEngine::init_background_img_pipeline() {
     }
     VK_LOG_SUCCESS("Created pipeline-layout for background-img draw");
 
-    // Create the Compute-Pipeline
-    // Load the SpirV compiled compute-shader
-    VkShaderModule computeDrawShaderModule;
-    if (!vkutil::load_shader_module(_device, &computeDrawShaderModule, "./shaders/gradient.comp.spv")) {
-        VK_LOG_ERROR("Failed to load SpirV shader: gradient.comp.spv");
-        throw std::runtime_error("Failed to load SpirV shader: gradient.comp.spv");
+    // Create the Compute-Pipelines
+    // Load the SpirV compiled compute-shaders
+    VkShaderModule fractalShaderModule;
+    if (!vkutil::load_shader_module(_device, &fractalShaderModule, "./shaders/fractal.comp.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: fractal.comp.spv");
+        throw std::runtime_error("Failed to load SpirV shader: fractal.comp.spv");
     }
-    VK_LOG_INFO("Loaded SpirV shader: gradient.comp.spv");
-    VK_LOG_INFO("Created compute shader-module from shader: gradient.comp.spv");
+    VK_LOG_INFO("Loaded SpirV shader: fractal.comp.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: fractal.comp.spv");
 
-    VkPipelineShaderStageCreateInfo pipelineShaderStageInfo{};
-    pipelineShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipelineShaderStageInfo.pNext = nullptr;
-    pipelineShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipelineShaderStageInfo.module = computeDrawShaderModule;
-    pipelineShaderStageInfo.pName = "main";
+    VkShaderModule rayTracedShaderModule;
+    if (!vkutil::load_shader_module(_device, &rayTracedShaderModule, "./shaders/raytraced_scene.comp.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: raytraced_scene.comp.spv");
+        throw std::runtime_error("Failed to load SpirV shader: raytraced_scene.comp.spv");
+    }
+    VK_LOG_INFO("Loaded SpirV shader: raytraced_scene.comp.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: raytraced_scene.comp.spv");
 
-    VkComputePipelineCreateInfo computePipelineCreateInfo{};
-    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    computePipelineCreateInfo.pNext = nullptr;
-    computePipelineCreateInfo.layout = _backgroundImgPipelineLayout;
-    computePipelineCreateInfo.stage = pipelineShaderStageInfo;
+    // Create the compute pipeline for the fractal-shader:
+    VkPipelineShaderStageCreateInfo fractalStageInfo{};
+    fractalStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fractalStageInfo.pNext = nullptr;
+    fractalStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    fractalStageInfo.module = fractalShaderModule;
+    fractalStageInfo.pName = "main";
 
-    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &_backgroundImgPipeline);
+    VkComputePipelineCreateInfo fractalPipelineCreateInfo{};
+    fractalPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    fractalPipelineCreateInfo.pNext = nullptr;
+    fractalPipelineCreateInfo.layout = _backgroundImgPipelineLayout;
+    fractalPipelineCreateInfo.stage = fractalStageInfo;
+
+    ComputeShaderEffects fractalShaderEffect {};
+    fractalShaderEffect.name = "Fractal Tunnel";
+    fractalShaderEffect.pipeline_layout = _backgroundImgPipelineLayout;
+    fractalShaderEffect.push_constants_data = {};
+
+    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &fractalPipelineCreateInfo, nullptr, &fractalShaderEffect.pipeline);
     if (result != VK_SUCCESS) {
-        VK_LOG_ERROR("Failed to create compute pipeline");
-        throw std::runtime_error("Failed to create compute pipeline");
+        VK_LOG_ERROR("Failed to create compute pipeline for fractal-shader");
+        throw std::runtime_error("Failed to create compute pipeline for fractal-shader");
     }
-    VK_LOG_SUCCESS("Created compute pipeline");
+    VK_LOG_SUCCESS("Created compute pipeline for fractal-shader");
+
+    // Create the compute pipeline for the raytraced-scene shader:
+    VkPipelineShaderStageCreateInfo raytracedStageInfo{};
+    raytracedStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    raytracedStageInfo.pNext = nullptr;
+    raytracedStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    raytracedStageInfo.module = rayTracedShaderModule;
+    raytracedStageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo raytracedPipelineCreateInfo{};
+    raytracedPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    raytracedPipelineCreateInfo.pNext = nullptr;
+    raytracedPipelineCreateInfo.layout = _backgroundImgPipelineLayout;
+    raytracedPipelineCreateInfo.stage = raytracedStageInfo;
+
+    ComputeShaderEffects rayTracedSceneEffect {};
+    rayTracedSceneEffect.name = "Ray-Traced Scene";
+    rayTracedSceneEffect.pipeline_layout = _backgroundImgPipelineLayout;
+    rayTracedSceneEffect.push_constants_data = {};
+
+    result = vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &raytracedPipelineCreateInfo, nullptr, &rayTracedSceneEffect.pipeline);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create compute pipeline for raytraced-scene-shader");
+        throw std::runtime_error("Failed to create compute pipeline for raytraced-scene-shader");
+    }
+    VK_LOG_SUCCESS("Created compute pipeline for raytraced-scene-shader");
+
+
+    // Add the 2 compute-shader background effects to the array of effects:
+    _computeShaderBackgroundEffects.push_back(fractalShaderEffect);
+    _computeShaderBackgroundEffects.push_back(rayTracedSceneEffect);
 
 
     // Schedule cleanup
-    vkDestroyShaderModule(_device, computeDrawShaderModule, nullptr);  // We no longer need it after creating the pipeline
-    _mainDeletionQueue.push_deleter([&]() {
+    vkDestroyShaderModule(_device, fractalShaderModule, nullptr);   // We no longer need it after creating the pipeline
+    vkDestroyShaderModule(_device, rayTracedShaderModule, nullptr); // We no longer need it after creating the pipeline
+    _mainDeletionQueue.push_deleter([=, this]() {
         vkDestroyPipelineLayout(_device, _backgroundImgPipelineLayout, nullptr);
-        vkDestroyPipeline(_device, _backgroundImgPipeline, nullptr);
+        vkDestroyPipeline(_device, rayTracedSceneEffect.pipeline, nullptr);
+        vkDestroyPipeline(_device, fractalShaderEffect.pipeline, nullptr);
     });
 }
+
+void VulkanEngine::init_triangle_pipeline() {
+    // Load the SpirV compiled fragment-shaders
+    VkShaderModule triangleVertexShaderModule;
+    if (!vkutil::load_shader_module(_device, &triangleVertexShaderModule, "./shaders/triangle.vert.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: triangle.vert.spv");
+        throw std::runtime_error("Failed to load SpirV shader: triangle.vert.spv");
+    }
+    VK_LOG_INFO("Loaded SpirV shader: triangle.vert.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: triangle.vert.spv");
+
+    VkShaderModule triangleFragmentShaderModule;
+    if (!vkutil::load_shader_module(_device, &triangleFragmentShaderModule, "./shaders/triangle.frag.spv")) {
+        VK_LOG_ERROR("Failed to load SpirV shader: triangle.frag.spv");
+        throw std::runtime_error("Failed to load SpirV shader: triangle.frag.spv");
+    }
+    VK_LOG_INFO("Loaded SpirV shader: triangle.frag.spv");
+    VK_LOG_INFO("Created compute shader-module from shader: triangle.frag.spv");
+
+
+    // Create the pipeline layout
+    VkPipelineLayoutCreateInfo triangle_pipeline_layout_info {};
+    triangle_pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    triangle_pipeline_layout_info.pNext = nullptr;
+    // empty defaults
+    triangle_pipeline_layout_info.flags = 0;
+    triangle_pipeline_layout_info.setLayoutCount = 0;
+    triangle_pipeline_layout_info.pSetLayouts = nullptr;
+    triangle_pipeline_layout_info.pushConstantRangeCount = 0;
+    triangle_pipeline_layout_info.pPushConstantRanges = nullptr;
+
+    VkResult result = vkCreatePipelineLayout(_device, &triangle_pipeline_layout_info, nullptr, &_trianglePipelineLayout);
+    if (result != VK_SUCCESS) {
+        VK_LOG_ERROR("Failed to create triangle pipeline-layout");
+        throw std::runtime_error("Failed to create triangle pipeline-layout");
+    }
+    VK_LOG_SUCCESS("Created triangle pipeline-layout");
+
+    // Create the Graphics-Pipeline
+    GraphicsPipelineBuilder graphics_pipeline_builder{};
+    graphics_pipeline_builder.set_pipeline_layout(_trianglePipelineLayout);
+    graphics_pipeline_builder.set_shader_modules(triangleVertexShaderModule, triangleFragmentShaderModule);
+    graphics_pipeline_builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    graphics_pipeline_builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    graphics_pipeline_builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    graphics_pipeline_builder.set_multisampling_none();
+    graphics_pipeline_builder.set_blending_none();
+    graphics_pipeline_builder.disable_depth_testing();
+    graphics_pipeline_builder.set_color_attachment_format(_drawImage.imageFormat);
+    graphics_pipeline_builder.set_depth_attachment_format(VK_FORMAT_UNDEFINED);
+
+    _trianglePipeline = graphics_pipeline_builder.build_pipeline(_device);
+
+    // Destroy the shader-modules
+    vkDestroyShaderModule(_device, triangleVertexShaderModule, nullptr);
+    vkDestroyShaderModule(_device, triangleFragmentShaderModule, nullptr);
+
+
+    // Queue cleanup deletion
+    _mainDeletionQueue.push_deleter([&]() {
+        vkDestroyPipelineLayout(_device, _trianglePipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _trianglePipeline, nullptr);
+    });
+}
+
 
 void VulkanEngine::create_swapchain(uint32_t width, uint32_t height) {
     vkb::SwapchainBuilder swapchainBuilder {_physicalDevice, _device, _surface};

@@ -44,6 +44,23 @@ struct FrameData {
 	DeletionQueue deletionQueue;
 };
 
+/// The vec4 parameters corresponding to the push-constants used in the compute-shaders
+struct ComputeShaderPushConstants {
+	glm::vec4 data_1;
+	glm::vec4 data_2;
+	glm::vec4 data_3;
+	glm::vec4 data_4;
+};
+
+/// We will have an array of this struct to switch between the compute shader pipelines, in the UI at runtime
+struct ComputeShaderEffects {
+	const char* name;
+	VkPipeline pipeline;
+	VkPipelineLayout pipeline_layout;
+
+	ComputeShaderPushConstants push_constants_data;
+};
+
 
 /// The main Vulkan Engine class.
 ///
@@ -58,6 +75,8 @@ public:
 
 	// Draw loop
 	void draw();
+	// For rendering ImGui UI using dynamic rendering
+	void draw_imgui(VkCommandBuffer commandBuffer, VkImageView targetImageView);
 
 	// Run main loop
 	void run();
@@ -65,10 +84,13 @@ public:
 	/// Getter for fetching the FrameData struct for the current frame.
 	inline FrameData& get_current_frame() { return _frames.at(_frameNumber % FRAME_OVERLAP); }
 
+	/// Function for immediate submit actions
+	void immediate_submit(std::function<void(VkCommandBuffer)>&& function);
+
 private:
 	bool _isInitialized{ false };
 	bool stop_rendering{ false };
-	VkExtent2D _windowExtent{ 720 , 405 };
+	VkExtent2D _windowExtent{ 1440 , 810 };
 	int _frameNumber {0};
 	std::array<FrameData, FRAME_OVERLAP> _frames{};
 
@@ -108,9 +130,22 @@ private:
 	VkDescriptorSet _drawImageDescriptorSet;
 	VkDescriptorSetLayout _drawImageDescriptorSetLayout;
 
-	// Pipelines
+	// Compute-Pipelines
 	VkPipeline _backgroundImgPipeline;
 	VkPipelineLayout _backgroundImgPipelineLayout;
+
+	// Graphics-Pipelines
+	VkPipeline _trianglePipeline;
+	VkPipelineLayout _trianglePipelineLayout;
+
+	// Immediate Submit Structures
+	VkFence _immediateFence{ nullptr };
+	VkCommandPool _immediateCommandPool{ nullptr };
+	VkCommandBuffer _immediateCommandBuffer{ nullptr };
+
+	// Array containing the compute-shader effects for switching in the UI at runtime
+	std::vector<ComputeShaderEffects> _computeShaderBackgroundEffects {};
+	int _currentComputeShaderBackgroundEffect {0};
 
 
 	// Initialization helper methods
@@ -122,7 +157,13 @@ private:
 
 	void init_vulkan_memory_allocator();
 	void init_descriptors();
+	void init_imgui();
+
+	// Compute-Pipeline Initializers
 	void init_background_img_pipeline();
+
+	// Graphics-Pipeline Initializers
+	void init_triangle_pipeline();
 
 	void create_swapchain(uint32_t width, uint32_t height);
 	void destroy_swapchain();
